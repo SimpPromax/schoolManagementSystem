@@ -1,99 +1,132 @@
 package com.system.SchoolManagementSystem.auth.entity;
 
 import jakarta.persistence.*;
-import lombok.*;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.UpdateTimestamp;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 
+import java.time.LocalDateTime;
 import java.util.Collection;
-import java.util.List;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 
 @Entity
-@Table(name = "users")
-@Getter
-@Setter
+@Table(name = "users",
+        uniqueConstraints = {
+                @UniqueConstraint(columnNames = "username"),
+                @UniqueConstraint(columnNames = "email")
+        })
+@Data
+@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Builder
 public class User implements UserDetails {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private String id;
 
-    @Column(nullable = false, unique = true, length = 100)
+    @Column(nullable = false, unique = true)
     private String username;
 
-    @Column(nullable = false, length = 255)
+    @Column(nullable = false)
     private String password;
 
-    @Column(nullable = false, length = 50)
-    private String role;
-
-    @Column(name = "tenant_id", nullable = false, length = 50)
-    private String tenantId;
-
-    @Column(name = "database_name", length = 50)
-    private String databaseName;
-
-    @Column(name = "full_name", length = 255)
-    private String fullName;
-
-    @Column(name = "email", length = 255)
+    @Column(nullable = false)
     private String email;
 
-    @Column(name = "phone", length = 20)
+    @Column(nullable = false)
+    private String fullName;
+
+    @Column
     private String phone;
 
-    @Column(name = "is_enabled")
-    @Builder.Default
-    private boolean enabled = true;
+    @Column
+    private String address;
 
-    @Column(name = "account_non_expired")
-    @Builder.Default
-    private boolean accountNonExpired = true;
+    @Column
+    private String profilePicture;
 
-    @Column(name = "account_non_locked")
+    @Column(nullable = false)
     @Builder.Default
-    private boolean accountNonLocked = true;
+    private String role = "USER";
 
-    @Column(name = "credentials_non_expired")
+    @ElementCollection(fetch = FetchType.EAGER)
+    @CollectionTable(name = "user_roles", joinColumns = @JoinColumn(name = "user_id"))
+    @Column(name = "role")
     @Builder.Default
-    private boolean credentialsNonExpired = true;
+    private Set<String> roles = new HashSet<>();
 
+    @Column
+    @Builder.Default
+    private Boolean isAccountNonExpired = true;
+
+    @Column
+    @Builder.Default
+    private Boolean isAccountNonLocked = true;
+
+    @Column
+    @Builder.Default
+    private Boolean isCredentialsNonExpired = true;
+
+    // Setter for isEnabled to match the field name
+    // Getter for isEnabled to match the field name
+    @Column
+    @Builder.Default
+    private Boolean isEnabled = true;
+
+    @Column
+    private LocalDateTime lastLoginAt;
+
+    @Column
+    private LocalDateTime passwordChangedAt;
+
+    @Column
+    private Integer failedLoginAttempts = 0;
+
+    @Column
+    private LocalDateTime lockedUntil;
+
+    @CreationTimestamp
+    private LocalDateTime createdAt;
+
+    @UpdateTimestamp
+    private LocalDateTime updatedAt;
+
+    // UserDetails implementation
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        return List.of(new SimpleGrantedAuthority("ROLE_" + role));
-    }
-
-    @Override
-    public String getPassword() {
-        return password;
-    }
-
-    @Override
-    public String getUsername() {
-        return username;
+        return Collections.singletonList(new SimpleGrantedAuthority("ROLE_" + role));
     }
 
     @Override
     public boolean isAccountNonExpired() {
-        return accountNonExpired;
+        return isAccountNonExpired;
     }
 
     @Override
     public boolean isAccountNonLocked() {
-        return accountNonLocked;
+        if (lockedUntil != null && lockedUntil.isAfter(LocalDateTime.now())) {
+            return false;
+        }
+        return isAccountNonLocked;
     }
 
     @Override
     public boolean isCredentialsNonExpired() {
-        return credentialsNonExpired;
+        return isCredentialsNonExpired;
     }
 
     @Override
     public boolean isEnabled() {
-        return enabled;
+        return isEnabled;
     }
+
 }

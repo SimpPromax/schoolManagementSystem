@@ -1,145 +1,202 @@
 package com.system.SchoolManagementSystem.auth.controller;
 
-import com.system.SchoolManagementSystem.auth.dto.LoginRequest;
-import com.system.SchoolManagementSystem.auth.dto.LoginResponse;
-import com.system.SchoolManagementSystem.auth.dto.RegistrationRequest;
+import com.system.SchoolManagementSystem.auth.dto.*;
 import com.system.SchoolManagementSystem.auth.entity.User;
-import com.system.SchoolManagementSystem.auth.repository.UserRepository;
-import com.system.SchoolManagementSystem.auth.service.CustomUserDetailsService;
+import com.system.SchoolManagementSystem.auth.service.AuthService;
 import com.system.SchoolManagementSystem.common.response.ApiResponse;
-import com.system.SchoolManagementSystem.config.JwtTokenUtil;
-import com.system.SchoolManagementSystem.config.TenantContext;
 import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.HashMap;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/auth")
+@RequiredArgsConstructor
 @Slf4j
 public class AuthController {
 
-    private final UserRepository userRepository;
-    private final PasswordEncoder passwordEncoder;
-    private final AuthenticationManager authenticationManager;
-    private final JwtTokenUtil jwtTokenUtil;
-    private final CustomUserDetailsService userDetailsService;
-
-    public AuthController(UserRepository userRepository,
-                          PasswordEncoder passwordEncoder,
-                          AuthenticationManager authenticationManager,
-                          JwtTokenUtil jwtTokenUtil,
-                          CustomUserDetailsService userDetailsService) {
-        this.userRepository = userRepository;
-        this.passwordEncoder = passwordEncoder;
-        this.authenticationManager = authenticationManager;
-        this.jwtTokenUtil = jwtTokenUtil;
-        this.userDetailsService = userDetailsService;
-    }
-
-    @PostMapping("/register")
-    public ResponseEntity<ApiResponse<String>> registerUser(@Valid @RequestBody RegistrationRequest request) {
-        String tenantId = TenantContext.getCurrentTenant();
-        String databaseName = TenantContext.getCurrentDatabase();
-
-        log.info("Registering user in tenant: {}, database: {}", tenantId, databaseName);
-
-        if (userRepository.existsByUsernameAndTenantId(request.getUsername(), tenantId)) {
-            return ResponseEntity.badRequest()
-                    .body(ApiResponse.error("Username already exists in this tenant"));
-        }
-
-        User newUser = User.builder()
-                .username(request.getUsername())
-                .password(passwordEncoder.encode(request.getPassword()))
-                .role("USER")
-                .tenantId(tenantId)
-                .databaseName(databaseName)
-                .fullName(request.getFullName())
-                .email(request.getEmail())
-                .phone(request.getPhone())
-                .build();
-
-        userRepository.save(newUser);
-        return ResponseEntity.ok(ApiResponse.success("User registered successfully"));
-    }
+    private final AuthService authService;
 
     @PostMapping("/login")
     public ResponseEntity<ApiResponse<LoginResponse>> login(@Valid @RequestBody LoginRequest request) {
         try {
-            Authentication authentication = authenticationManager.authenticate(
-                    new UsernamePasswordAuthenticationToken(
-                            request.getUsername(),
-                            request.getPassword()
-                    )
-            );
-
-            UserDetails userDetails = userDetailsService.loadUserByUsername(request.getUsername());
-
-            String role = userDetails.getAuthorities().stream()
-                    .findFirst()
-                    .map(GrantedAuthority::getAuthority)
-                    .map(auth -> auth.replace("ROLE_", ""))
-                    .orElse("USER");
-
-            String tenantId = TenantContext.getCurrentTenant();
-            String databaseName = TenantContext.getCurrentDatabase();
-
-            if (userDetails instanceof User) {
-                User user = (User) userDetails;
-                if (user.getDatabaseName() != null) {
-                    databaseName = user.getDatabaseName();
-                }
-            }
-
-            String token = jwtTokenUtil.generateToken(userDetails, tenantId, databaseName, role);
-
-            LoginResponse loginResponse = new LoginResponse(
-                    token, role, tenantId, databaseName, request.getUsername()
-            );
-
-            log.info("User {} logged in to tenant: {}, database: {}",
-                    request.getUsername(), tenantId, databaseName);
-
-            return ResponseEntity.ok(ApiResponse.success("Login successful", loginResponse));
-
-        } catch (Exception e) {
-            log.error("Login failed for user: {}", request.getUsername(), e);
-            return ResponseEntity.status(401)
-                    .body(ApiResponse.error("Invalid username or password"));
+            log.info("Login request received for user: {}", request.getUsername());
+            LoginResponse response = authService.login(request);
+            return ResponseEntity.ok(ApiResponse.success(response, "Login successful"));
+        } catch (RuntimeException e) {
+            log.error("Login failed: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(ApiResponse.error(e.getMessage()));
         }
     }
 
-    @PostMapping("/register-admin")
-    public ResponseEntity<ApiResponse<String>> registerAdmin(@Valid @RequestBody RegistrationRequest request) {
-        if (!"master".equals(TenantContext.getCurrentTenant())) {
-            return ResponseEntity.status(403)
-                    .body(ApiResponse.error("Only allowed from master tenant"));
+    @PostMapping("/register")
+    public ResponseEntity<ApiResponse<Void>> register(@Valid @RequestBody RegisterRequest request) {
+        try {
+            log.info("Registration request received for user: {}", request.getUsername());
+            authService.register(request);
+            return ResponseEntity.status(HttpStatus.CREATED)
+                    .body(ApiResponse.success("Registration successful. You can now login."));
+        } catch (RuntimeException e) {
+            log.error("Registration failed: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
         }
+    }
 
-        if (userRepository.existsByUsername(request.getUsername())) {
-            return ResponseEntity.badRequest()
-                    .body(ApiResponse.error("Username already exists"));
+    @PostMapping("/refresh-token")
+    public ResponseEntity<ApiResponse<LoginResponse>> refreshToken(
+            @RequestHeader("Authorization") String refreshToken) {
+        try {
+            log.info("Refresh token request received");
+            LoginResponse response = authService.refreshToken(refreshToken);
+            return ResponseEntity.ok(ApiResponse.success(response, "Token refreshed successfully"));
+        } catch (RuntimeException e) {
+            log.error("Token refresh failed: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(ApiResponse.error(e.getMessage()));
         }
+    }
 
-        User adminUser = User.builder()
-                .username(request.getUsername())
-                .password(passwordEncoder.encode(request.getPassword()))
-                .role("ADMIN")
-                .tenantId("master")
-                .databaseName("school_master")
-                .fullName(request.getFullName())
-                .email(request.getEmail())
-                .phone(request.getPhone())
-                .build();
+    @GetMapping("/me")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<ApiResponse<UserProfile>> getCurrentUser(
+            @AuthenticationPrincipal UserDetails userDetails) {
+        try {
+            log.info("Get current user request for: {}", userDetails.getUsername());
+            UserProfile profile = authService.getCurrentUserProfile();
+            return ResponseEntity.ok(ApiResponse.success(profile, "User profile retrieved successfully"));
+        } catch (RuntimeException e) {
+            log.error("Get current user failed: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
 
-        userRepository.save(adminUser);
-        return ResponseEntity.ok(ApiResponse.success("Admin user registered successfully"));
+    @PutMapping("/change-password")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<ApiResponse<Void>> changePassword(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @Valid @RequestBody ChangePasswordRequest request) {
+        try {
+            log.info("Change password request for user: {}", userDetails.getUsername());
+            User user = (User) userDetails;
+            String userId = user.getId();
+            authService.changePassword(userId, request);
+            return ResponseEntity.ok(ApiResponse.success("Password changed successfully"));
+        } catch (RuntimeException e) {
+            log.error("Change password failed: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/profile")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<ApiResponse<UserProfile>> updateProfile(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @Valid @RequestBody UpdateProfileRequest request) {
+        try {
+            log.info("Update profile request for user: {}", userDetails.getUsername());
+            User user = (User) userDetails;
+            String userId = user.getId();
+            UserProfile updatedProfile = authService.updateProfile(userId, request);
+            return ResponseEntity.ok(ApiResponse.success(updatedProfile, "Profile updated successfully"));
+        } catch (RuntimeException e) {
+            log.error("Update profile failed: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/logout")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<ApiResponse<Void>> logout(
+            @AuthenticationPrincipal UserDetails userDetails) {
+        try {
+            log.info("Logout request for user: {}", userDetails.getUsername());
+            User user = (User) userDetails;
+            String userId = user.getId();
+            authService.logout(userId);
+            return ResponseEntity.ok(ApiResponse.success("Logged out successfully"));
+        } catch (RuntimeException e) {
+            log.error("Logout failed: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    // Admin endpoints
+    @PutMapping("/users/{userId}/enable")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponse<Void>> enableUser(@PathVariable String userId) {
+        try {
+            log.info("Enable user request for user ID: {}", userId);
+            authService.enableUser(userId);
+            return ResponseEntity.ok(ApiResponse.success("User enabled successfully"));
+        } catch (RuntimeException e) {
+            log.error("Enable user failed: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/users/{userId}/disable")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponse<Void>> disableUser(@PathVariable String userId) {
+        try {
+            log.info("Disable user request for user ID: {}", userId);
+            authService.disableUser(userId);
+            return ResponseEntity.ok(ApiResponse.success("User disabled successfully"));
+        } catch (RuntimeException e) {
+            log.error("Disable user failed: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/users/{userId}/unlock")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponse<Void>> unlockUser(@PathVariable String userId) {
+        try {
+            log.info("Unlock user request for user ID: {}", userId);
+            authService.unlockUser(userId);
+            return ResponseEntity.ok(ApiResponse.success("User unlocked successfully"));
+        } catch (RuntimeException e) {
+            log.error("Unlock user failed: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    // Handle validation exceptions for this controller only
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ApiResponse<Map<String, String>>> handleValidationExceptions(
+            MethodArgumentNotValidException ex) {
+
+        Map<String, String> errors = new HashMap<>();
+        ex.getBindingResult().getFieldErrors().forEach(error ->
+                errors.put(error.getField(), error.getDefaultMessage())
+        );
+
+        log.warn("Validation failed: {}", errors);
+
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ApiResponse.error("Validation failed"));
+    }
+
+    // Health check endpoint
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, String>> health() {
+        return ResponseEntity.ok(Map.of("status", "UP", "service", "auth-service"));
     }
 }

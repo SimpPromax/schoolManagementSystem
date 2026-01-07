@@ -1,8 +1,10 @@
 package com.system.SchoolManagementSystem.config;
 
-import io.jsonwebtoken.*;
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
-import io.jsonwebtoken.security.SignatureException;
+import lombok.Getter;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Component;
@@ -19,10 +21,19 @@ public class JwtTokenUtil {
     @Value("${app.jwt.secret}")
     private String jwtSecret;
 
-    @Value("${app.jwt.expiration}")
+    @Getter
+    @Value("${app.jwt.expiration:86400000}") // Default 24 hours
     private Long jwtExpiration;
 
+    @Getter
+    @Value("${app.jwt.refresh-expiration:604800000}") // Default 7 days
+    private Long refreshExpiration;
+
     private Key getSigningKey() {
+        // Ensure the secret is at least 256 bits (32 characters)
+        if (jwtSecret.length() < 32) {
+            throw new IllegalArgumentException("JWT secret must be at least 32 characters long");
+        }
         return Keys.hmacShaKeyFor(jwtSecret.getBytes());
     }
 
@@ -30,20 +41,12 @@ public class JwtTokenUtil {
         return getClaimFromToken(token, Claims::getSubject);
     }
 
-    public String getTenantIdFromToken(String token) {
-        return getClaimFromToken(token, claims -> claims.get("tenantId", String.class));
-    }
-
-    public String getDatabaseNameFromToken(String token) {
-        return getClaimFromToken(token, claims -> claims.get("databaseName", String.class));
+    public Date getExpirationDateFromToken(String token) {
+        return getClaimFromToken(token, Claims::getExpiration);
     }
 
     public String getRoleFromToken(String token) {
         return getClaimFromToken(token, claims -> claims.get("role", String.class));
-    }
-
-    public Date getExpirationDateFromToken(String token) {
-        return getClaimFromToken(token, Claims::getExpiration);
     }
 
     public <T> T getClaimFromToken(String token, Function<Claims, T> claimsResolver) {
@@ -52,42 +55,43 @@ public class JwtTokenUtil {
     }
 
     private Claims getAllClaimsFromToken(String token) {
-        try {
-            return Jwts.parserBuilder()
-                    .setSigningKey(getSigningKey())
-                    .build()
-                    .parseClaimsJws(token)
-                    .getBody();
-        } catch (ExpiredJwtException e) {
-            throw e;
-        } catch (UnsupportedJwtException | MalformedJwtException | SignatureException | IllegalArgumentException e) {
-            throw new JwtException("Invalid JWT token: " + e.getMessage(), e);
-        }
+        return Jwts.parserBuilder()
+                .setSigningKey(getSigningKey())
+                .build()
+                .parseClaimsJws(token)
+                .getBody();
     }
 
     private Boolean isTokenExpired(String token) {
-        try {
-            final Date expiration = getExpirationDateFromToken(token);
-            return expiration.before(new Date());
-        } catch (JwtException e) {
-            return true;
-        }
+        final Date expiration = getExpirationDateFromToken(token);
+        return expiration.before(new Date());
     }
 
-    public String generateToken(UserDetails userDetails, String tenantId, String databaseName, String role) {
+    public String generateToken(UserDetails userDetails) {
         Map<String, Object> claims = new HashMap<>();
-        claims.put("tenantId", tenantId);
-        claims.put("databaseName", databaseName);
-        claims.put("role", role);
-        return doGenerateToken(claims, userDetails.getUsername());
+
+        // Add user role to claims if available
+        if (userDetails instanceof com.system.SchoolManagementSystem.auth.entity.User) {
+            com.system.SchoolManagementSystem.auth.entity.User user =
+                    (com.system.SchoolManagementSystem.auth.entity.User) userDetails;
+            claims.put("role", user.getRole());
+            claims.put("userId", user.getId());
+        }
+
+        return doGenerateToken(claims, userDetails.getUsername(), jwtExpiration);
     }
 
-    private String doGenerateToken(Map<String, Object> claims, String subject) {
+    public String generateRefreshToken(String username) {
+        Map<String, Object> claims = new HashMap<>();
+        return doGenerateToken(claims, username, refreshExpiration);
+    }
+
+    private String doGenerateToken(Map<String, Object> claims, String subject, Long expiration) {
         return Jwts.builder()
                 .setClaims(claims)
                 .setSubject(subject)
                 .setIssuedAt(new Date(System.currentTimeMillis()))
-                .setExpiration(new Date(System.currentTimeMillis() + jwtExpiration))
+                .setExpiration(new Date(System.currentTimeMillis() + expiration))
                 .signWith(getSigningKey(), SignatureAlgorithm.HS512)
                 .compact();
     }
@@ -96,8 +100,9 @@ public class JwtTokenUtil {
         try {
             final String username = getUsernameFromToken(token);
             return (username.equals(userDetails.getUsername()) && !isTokenExpired(token));
-        } catch (JwtException e) {
+        } catch (Exception e) {
             return false;
         }
     }
+
 }

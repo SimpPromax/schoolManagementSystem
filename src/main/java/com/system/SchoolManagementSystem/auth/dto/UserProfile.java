@@ -13,20 +13,19 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_NULL)
-public class LoginResponse {
-
-    private String token;
-    private String refreshToken;
-    private String tokenType = "Bearer";
-    private Long expiresIn;
-    private LocalDateTime expiresAt;
+public class UserProfile {
 
     private String id;
     private String username;
     private String email;
     private String fullName;
     private String phone;
-    private String role;
+    private String address;
     private String profilePicture;
+    private String role;
+    private Boolean isAccountNonLocked;
+    private Boolean isEnabled;
     private LocalDateTime lastLoginAt;
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 }

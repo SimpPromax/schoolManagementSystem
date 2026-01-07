@@ -1,8 +1,8 @@
 package com.system.SchoolManagementSystem.config;
 
+import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.annotation.Order;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -23,19 +23,11 @@ import java.util.List;
 @Configuration
 @EnableWebSecurity
 @EnableMethodSecurity
+@RequiredArgsConstructor
 public class SecurityConfig {
 
-    private final CustomAuthenticationEntryPoint entryPoint;
     private final JwtRequestFilter jwtRequestFilter;
-    private final TenantFilter tenantFilter;
-
-    public SecurityConfig(CustomAuthenticationEntryPoint entryPoint,
-                          JwtRequestFilter jwtRequestFilter,
-                          TenantFilter tenantFilter) {
-        this.entryPoint = entryPoint;
-        this.jwtRequestFilter = jwtRequestFilter;
-        this.tenantFilter = tenantFilter;
-    }
+    private final CustomAuthenticationEntryPoint authenticationEntryPoint;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -46,66 +38,53 @@ public class SecurityConfig {
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
                 )
                 .authorizeHttpRequests(auth -> auth
-                        // Public endpoints - NO authentication required
+                        // Public endpoints
                         .requestMatchers(
-                                // Authentication endpoints
+                                // Authentication
                                 "/api/auth/login",
                                 "/api/auth/register",
+                                "/api/auth/refresh-token",
+                                "/api/auth/health",
 
-                                // Tenant registration
-                                "/api/tenants/register",
-
-                                // Public demo endpoints
-                                "/api/demo/public/**",
-
-                                // Tenant demo endpoints (for testing)
-                                "/api/tenant-demo/**",
+                                // Public APIs
+                                "/api/public/**",
 
                                 // Error handling
                                 "/error",
 
-                                // Actuator endpoints
-                                "/actuator/**",
+                                // Actuator
+                                "/actuator/health",
+                                "/actuator/info",
 
-                                // API documentation
+                                // API Documentation
                                 "/swagger-ui/**",
+                                "/swagger-ui.html",
                                 "/v3/api-docs/**",
                                 "/api-docs/**",
 
-                                // Root and favicon
+                                // Web resources
                                 "/",
-                                "/favicon.ico"
+                                "/favicon.ico",
+                                "/webjars/**",
+                                "/css/**",
+                                "/js/**",
+                                "/images/**"
                         ).permitAll()
 
-                        // Protected endpoints - Authentication required
-                        .requestMatchers("/api/auth/register-admin").hasRole("ADMIN")
+                        // Role-based access
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
-                        .requestMatchers("/api/tenant-admin/**").hasRole("TENANT_ADMIN")
-                        .requestMatchers("/api/teacher/**").hasRole("TEACHER")
-                        .requestMatchers("/api/student/**").hasAnyRole("STUDENT", "USER")
+                        .requestMatchers("/api/teacher/**").hasAnyRole("ADMIN", "TEACHER")
+                        .requestMatchers("/api/student/**").hasAnyRole("ADMIN", "TEACHER", "STUDENT")
+                        .requestMatchers("/api/parent/**").hasAnyRole("ADMIN", "TEACHER", "PARENT")
 
-                        // Demo endpoints - Authentication required
-                        .requestMatchers("/api/demo/protected/**").authenticated()
-                        .requestMatchers("/api/demo/create", "/api/demo/all",
-                                "/api/demo/{id}", "/api/demo/update/{id}",
-                                "/api/demo/delete/{id}").authenticated()
-
-                        // Tenant management - Admin only
-                        .requestMatchers("/api/tenants").hasRole("ADMIN")
-                        .requestMatchers("/api/tenants/**").hasRole("ADMIN")
-
-                        // All other API endpoints require authentication
-                        .requestMatchers("/api/**").authenticated()
-
-                        // Allow all other requests (static resources, etc.)
-                        .anyRequest().permitAll()
+                        // All other endpoints require authentication
+                        .anyRequest().authenticated()
                 )
                 .exceptionHandling(exception -> exception
-                        .authenticationEntryPoint(entryPoint)
+                        .authenticationEntryPoint(authenticationEntryPoint)
                 );
 
-        // Add filters with explicit ordering
-        http.addFilterBefore(tenantFilter, UsernamePasswordAuthenticationFilter.class);
+        // Add JWT filter
         http.addFilterBefore(jwtRequestFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
@@ -114,11 +93,37 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(Arrays.asList("http://localhost:3000", "http://localhost:4200", "http://localhost:8080"));
-        configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
-        configuration.setAllowedHeaders(List.of("*"));
-        configuration.setExposedHeaders(Arrays.asList("Authorization", "X-Tenant-ID"));
-        configuration.setAllowCredentials(true);
+
+        // Allow all origins for development (restrict in production)
+        configuration.setAllowedOrigins(Arrays.asList("*"));
+
+        // Allowed HTTP methods
+        configuration.setAllowedMethods(Arrays.asList(
+                "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"
+        ));
+
+        // Allowed headers
+        configuration.setAllowedHeaders(List.of(
+                "Authorization",
+                "Content-Type",
+                "X-Requested-With",
+                "Accept",
+                "Origin",
+                "Access-Control-Request-Method",
+                "Access-Control-Request-Headers",
+                "Cache-Control"
+        ));
+
+        // Exposed headers
+        configuration.setExposedHeaders(Arrays.asList(
+                "Authorization",
+                "Content-Disposition",
+                "X-Total-Count",
+                "X-Page",
+                "X-Per-Page"
+        ));
+
+        configuration.setAllowCredentials(false);
         configuration.setMaxAge(3600L);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

@@ -3,17 +3,20 @@ package com.system.SchoolManagementSystem.config;
 import com.system.SchoolManagementSystem.auth.service.CustomUserDetailsService;
 import com.system.SchoolManagementSystem.common.response.ApiResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.jsonwebtoken.*;
+import io.jsonwebtoken.ExpiredJwtException;
+import io.jsonwebtoken.MalformedJwtException;
+import io.jsonwebtoken.UnsupportedJwtException;
 import io.jsonwebtoken.security.SignatureException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import org.springframework.core.annotation.Order;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -23,82 +26,64 @@ import java.util.Arrays;
 import java.util.List;
 
 @Component
-@Order(2)
+@Slf4j
+@RequiredArgsConstructor
 public class JwtRequestFilter extends OncePerRequestFilter {
 
     private final CustomUserDetailsService userDetailsService;
     private final JwtTokenUtil jwtTokenUtil;
     private final ObjectMapper objectMapper;
 
-    // List of public endpoints that should bypass JWT filter
+    // Public endpoints that bypass JWT validation
     private static final List<String> PUBLIC_ENDPOINTS = Arrays.asList(
             "/api/auth/login",
             "/api/auth/register",
-            "/api/tenants/register",
-            "/api/demo/public/",
-            "/api/tenant-demo/",
+            "/api/auth/refresh-token",
+            "/api/auth/health",
+            "/api/public/",
             "/actuator/",
             "/swagger-ui/",
             "/v3/api-docs/",
-            "/api-docs/"
+            "/api-docs/",
+            "/webjars/",
+            "/css/",
+            "/js/",
+            "/images/"
     );
 
-    public JwtRequestFilter(CustomUserDetailsService userDetailsService,
-                            JwtTokenUtil jwtTokenUtil,
-                            ObjectMapper objectMapper) {
-        this.userDetailsService = userDetailsService;
-        this.jwtTokenUtil = jwtTokenUtil;
-        this.objectMapper = objectMapper;
-    }
-
     @Override
-    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain filterChain)
             throws ServletException, IOException {
 
         final String requestTokenHeader = request.getHeader("Authorization");
-
         String username = null;
         String jwtToken = null;
-        String tenantId = null;
-        String databaseName = null;
 
-        // Only process JWT if Authorization header is present
+        // Extract JWT token from Authorization header
         if (requestTokenHeader != null && requestTokenHeader.startsWith("Bearer ")) {
             jwtToken = requestTokenHeader.substring(7);
+
             try {
                 username = jwtTokenUtil.getUsernameFromToken(jwtToken);
-                tenantId = jwtTokenUtil.getTenantIdFromToken(jwtToken);
-                databaseName = jwtTokenUtil.getDatabaseNameFromToken(jwtToken);
-
-                // Set tenant context from JWT token
-                if (tenantId != null && !tenantId.trim().isEmpty()) {
-                    TenantContext.setCurrentTenant(tenantId.trim().toLowerCase());
-
-                    if (databaseName != null && !databaseName.trim().isEmpty()) {
-                        TenantContext.setCurrentDatabase(databaseName.trim().toLowerCase());
-                    } else {
-                        TenantContext.setCurrentDatabase(tenantId.trim().toLowerCase());
-                    }
-
-                    logger.debug("Set tenant context from JWT: tenantId=" + tenantId + ", databaseName=" + databaseName);
-                }
-
+                log.debug("Extracted username from JWT: {}", username);
+            } catch (IllegalArgumentException e) {
+                log.error("Unable to get JWT Token: {}", e.getMessage());
             } catch (ExpiredJwtException e) {
-                sendErrorResponse(response, "Token expired", HttpServletResponse.SC_UNAUTHORIZED);
+                log.error("JWT Token has expired");
+                sendErrorResponse(response, "Token has expired", HttpStatus.UNAUTHORIZED.value());
                 return;
-            } catch (UnsupportedJwtException | MalformedJwtException | SignatureException | IllegalArgumentException e) {
-                sendErrorResponse(response, "Invalid token", HttpServletResponse.SC_UNAUTHORIZED);
-                return;
-            } catch (JwtException e) {
-                sendErrorResponse(response, "JWT validation failed: " + e.getMessage(), HttpServletResponse.SC_UNAUTHORIZED);
+            } catch (UnsupportedJwtException | MalformedJwtException | SignatureException e) {
+                log.error("Invalid JWT Token: {}", e.getMessage());
+                sendErrorResponse(response, "Invalid token", HttpStatus.UNAUTHORIZED.value());
                 return;
             }
         } else {
-            // No JWT token, continue with tenant context set by TenantFilter
-            logger.debug("No JWT token found in request");
+            log.debug("No JWT token found or doesn't start with Bearer");
         }
 
-        // If we have a username from JWT and no authentication in context yet
+        // Validate token and set authentication in context
         if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
             try {
                 UserDetails userDetails = this.userDetailsService.loadUserByUsername(username);
@@ -109,26 +94,29 @@ public class JwtRequestFilter extends OncePerRequestFilter {
                                     userDetails, null, userDetails.getAuthorities());
                     authenticationToken.setDetails(
                             new WebAuthenticationDetailsSource().buildDetails(request));
-                    SecurityContextHolder.getContext().setAuthentication(authenticationToken);
 
-                    logger.debug("Authenticated user: " + username);
+                    SecurityContextHolder.getContext().setAuthentication(authenticationToken);
+                    log.debug("Authenticated user: {}", username);
+                } else {
+                    log.warn("Token validation failed for user: {}", username);
+                    sendErrorResponse(response, "Invalid token", HttpStatus.UNAUTHORIZED.value());
+                    return;
                 }
-            } catch (UsernameNotFoundException e) {
-                sendErrorResponse(response, "User not found", HttpServletResponse.SC_UNAUTHORIZED);
-                return;
             } catch (Exception e) {
-                logger.error("Error loading user details: " + e.getMessage());
-                sendErrorResponse(response, "Authentication failed", HttpServletResponse.SC_UNAUTHORIZED);
+                log.error("Error loading user details for {}: {}", username, e.getMessage());
+                sendErrorResponse(response, "Authentication failed", HttpStatus.UNAUTHORIZED.value());
                 return;
             }
         }
 
-        chain.doFilter(request, response);
+        filterChain.doFilter(request, response);
     }
 
     private void sendErrorResponse(HttpServletResponse response, String message, int status) throws IOException {
         response.setContentType("application/json");
         response.setStatus(status);
+
+        // Use the correct ApiResponse method
         ApiResponse<Object> errorResponse = ApiResponse.error(message);
         response.getWriter().write(objectMapper.writeValueAsString(errorResponse));
     }
@@ -138,18 +126,19 @@ public class JwtRequestFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
 
         // Skip JWT filter for public endpoints
-        for (String publicEndpoint : PUBLIC_ENDPOINTS) {
-            if (path.startsWith(publicEndpoint)) {
-                logger.debug("Skipping JWT filter for public endpoint: " + path);
-                return true;
-            }
-        }
+        boolean shouldSkip = PUBLIC_ENDPOINTS.stream()
+                .anyMatch(path::startsWith);
 
         // Also skip for root and error pages
-        if (path.equals("/") || path.equals("/error") || path.equals("/favicon.ico")) {
-            return true;
+        shouldSkip = shouldSkip ||
+                path.equals("/") ||
+                path.equals("/error") ||
+                path.equals("/favicon.ico");
+
+        if (shouldSkip) {
+            log.debug("Skipping JWT filter for path: {}", path);
         }
 
-        return false;
+        return shouldSkip;
     }
 }
