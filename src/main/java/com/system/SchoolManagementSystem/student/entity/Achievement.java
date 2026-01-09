@@ -11,9 +11,13 @@ import java.time.LocalDateTime;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@EqualsAndHashCode(onlyExplicitlyIncluded = true)  // Only include marked fields
+@ToString(exclude = {"student"})  // Exclude Student from toString
 public class Achievement {
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @EqualsAndHashCode.Include  // Only include ID in equals/hashCode
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY)

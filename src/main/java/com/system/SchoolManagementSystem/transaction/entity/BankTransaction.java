@@ -1,0 +1,79 @@
+package com.system.SchoolManagementSystem.transaction.entity;
+
+import com.system.SchoolManagementSystem.student.entity.Student;
+import com.system.SchoolManagementSystem.transaction.enums.PaymentMethod;
+import com.system.SchoolManagementSystem.transaction.enums.TransactionStatus;
+import com.system.SchoolManagementSystem.auth.entity.User;
+import jakarta.persistence.*;
+import lombok.*;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.UpdateTimestamp;
+
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "bank_transactions")
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+@EqualsAndHashCode(onlyExplicitlyIncluded = true)
+public class BankTransaction {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @EqualsAndHashCode.Include
+    private Long id;
+
+    @Column(name = "bank_reference", nullable = false, unique = true, length = 50)
+    private String bankReference;
+
+    @Column(nullable = false)
+    private LocalDate transactionDate;
+
+    @Column(nullable = false, length = 500)
+    private String description;
+
+    @Column(nullable = false)
+    private Double amount;
+
+    @Column(name = "bank_account", length = 50)
+    private String bankAccount;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private TransactionStatus status = TransactionStatus.UNVERIFIED;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "payment_method")
+    private PaymentMethod paymentMethod;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "student_id")
+    private Student student;
+
+    @CreationTimestamp
+    @Column(name = "imported_at", nullable = false, updatable = false)
+    private LocalDateTime importedAt;
+
+    @Column(name = "matched_at")
+    private LocalDateTime matchedAt;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "matched_by")
+    private User matchedBy;
+
+    @Column(name = "file_name")
+    private String fileName;
+
+    @Column(name = "import_batch_id")
+    private String importBatchId;
+
+    @PrePersist
+    protected void onCreate() {
+        if (paymentMethod == null) {
+            paymentMethod = PaymentMethod.BANK_TRANSFER;
+        }
+    }
+}

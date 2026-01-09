@@ -63,6 +63,19 @@ public class StudentDTO {
     private Double transportFee;
     private Student.FeeStatus transportFeeStatus;
 
+    // ========== FEE INFORMATION (NEW) ==========
+    private Double totalFee;          // Total fee for current academic year
+    private Double paidAmount;        // Amount paid so far
+    private Double pendingAmount;     // Amount pending
+    private Student.FeeStatus feeStatus; // Overall fee status
+
+    // Optional: Fee details breakdown
+    private Double tuitionFee;
+    private Double admissionFee;
+    private Double examinationFee;
+    private Double otherFees;
+    // ===========================================
+
     // Nested data
     private List<FamilyMemberDTO> familyMembers;
     private List<MedicalRecordDTO> medicalRecords;
@@ -71,4 +84,31 @@ public class StudentDTO {
     // Clubs & hobbies as arrays
     private List<String> clubs;
     private List<String> hobbies;
+
+    // Helper methods for fee calculations
+    public Double getPendingAmount() {
+        if (this.pendingAmount != null) {
+            return this.pendingAmount;
+        }
+        if (this.totalFee != null && this.paidAmount != null) {
+            return Math.max(0, this.totalFee - this.paidAmount);
+        }
+        return 0.0;
+    }
+
+    public Student.FeeStatus getFeeStatus() {
+        if (this.feeStatus != null) {
+            return this.feeStatus;
+        }
+        if (this.totalFee != null && this.paidAmount != null) {
+            if (this.paidAmount >= this.totalFee) {
+                return Student.FeeStatus.PAID;
+            } else if (this.paidAmount > 0) {
+                return Student.FeeStatus.PENDING;
+            } else {
+                return Student.FeeStatus.PENDING;
+            }
+        }
+        return Student.FeeStatus.PENDING;
+    }
 }

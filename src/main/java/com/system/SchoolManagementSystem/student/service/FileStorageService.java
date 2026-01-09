@@ -25,8 +25,7 @@ public class FileStorageService {
     private String publicUrl;
 
     /**
-     * -- GETTER --
-     *  Get upload directory path
+     * Get upload directory path
      */
     @Getter
     private Path uploadPath;
@@ -36,14 +35,20 @@ public class FileStorageService {
      */
     @PostConstruct
     public void init() {
+        log.info("[FILE-STORAGE-SERVICE] [INIT] Starting file storage service initialization");
+
         try {
             // Resolve upload directory path
             this.uploadPath = Paths.get(uploadDir).toAbsolutePath().normalize();
+            log.info("[FILE-STORAGE-SERVICE] [INIT] Upload directory configured: {}", uploadPath);
 
             // Create directory if it doesn't exist
             if (!Files.exists(uploadPath)) {
+                log.info("[FILE-STORAGE-SERVICE] [INIT] Creating upload directory: {}", uploadPath);
                 Files.createDirectories(uploadPath);
-                log.info("Created upload directory: {}", uploadPath);
+                log.info("[FILE-STORAGE-SERVICE] [INIT] Created upload directory: {}", uploadPath);
+            } else {
+                log.info("[FILE-STORAGE-SERVICE] [INIT] Upload directory already exists: {}", uploadPath);
             }
 
             // Create subdirectories
@@ -51,19 +56,29 @@ public class FileStorageService {
             Path certificatesDir = uploadPath.resolve("certificates");
             Path documentsDir = uploadPath.resolve("documents");
 
-            Files.createDirectories(profilesDir);
-            Files.createDirectories(certificatesDir);
-            Files.createDirectories(documentsDir);
+            createDirectoryIfNotExists(profilesDir, "profiles");
+            createDirectoryIfNotExists(certificatesDir, "certificates");
+            createDirectoryIfNotExists(documentsDir, "documents");
 
-            log.info("File storage initialized successfully");
-            log.info("Upload directory: {}", uploadPath);
-            log.info("Profiles directory: {}", profilesDir);
-            log.info("Certificates directory: {}", certificatesDir);
-            log.info("Public URL base: {}", publicUrl);
+            log.info("[FILE-STORAGE-SERVICE] [INIT] File storage initialized successfully");
+            log.info("[FILE-STORAGE-SERVICE] [INIT] Upload directory: {}", uploadPath);
+            log.info("[FILE-STORAGE-SERVICE] [INIT] Profiles directory: {}", profilesDir);
+            log.info("[FILE-STORAGE-SERVICE] [INIT] Certificates directory: {}", certificatesDir);
+            log.info("[FILE-STORAGE-SERVICE] [INIT] Public URL base: {}", publicUrl);
 
         } catch (IOException e) {
-            log.error("Could not initialize upload directory: {}", e.getMessage());
+            log.error("[FILE-STORAGE-SERVICE] [INIT] ERROR - Could not initialize upload directory: {}", e.getMessage(), e);
             throw new RuntimeException("Could not initialize upload directory", e);
+        }
+    }
+
+    private void createDirectoryIfNotExists(Path directory, String directoryName) throws IOException {
+        if (!Files.exists(directory)) {
+            log.info("[FILE-STORAGE-SERVICE] [INIT] Creating {} directory: {}", directoryName, directory);
+            Files.createDirectories(directory);
+            log.info("[FILE-STORAGE-SERVICE] [INIT] Created {} directory: {}", directoryName, directory);
+        } else {
+            log.debug("[FILE-STORAGE-SERVICE] [INIT] {} directory already exists: {}", directoryName, directory);
         }
     }
 
@@ -71,128 +86,210 @@ public class FileStorageService {
      * Store profile picture and return public URL
      */
     public String storeProfilePicture(MultipartFile file, Long studentId) throws IOException {
-        // Validate file is not empty
-        if (file.isEmpty()) {
-            throw new RuntimeException("Failed to store empty file");
+        log.info("[FILE-STORAGE-SERVICE] [STORE-PROFILE-PICTURE] Started - Student ID: {}", studentId);
+        log.debug("[FILE-STORAGE-SERVICE] [STORE-PROFILE-PICTURE] File details - Name: {}, Size: {} bytes",
+                file.getOriginalFilename(), file.getSize());
+
+        try {
+            // Validate file is not empty
+            if (file.isEmpty()) {
+                log.error("[FILE-STORAGE-SERVICE] [STORE-PROFILE-PICTURE] ERROR - Empty file provided");
+                throw new RuntimeException("Failed to store empty file");
+            }
+
+            // Get original filename and extension
+            String originalFilename = file.getOriginalFilename();
+            String fileExtension = getFileExtension(originalFilename);
+            log.debug("[FILE-STORAGE-SERVICE] [STORE-PROFILE-PICTURE] Original filename: {}, Extension: {}",
+                    originalFilename, fileExtension);
+
+            // Generate unique filename
+            String filename = "profile_" + studentId + "_" + UUID.randomUUID() + fileExtension;
+            log.debug("[FILE-STORAGE-SERVICE] [STORE-PROFILE-PICTURE] Generated filename: {}", filename);
+
+            // Store in profiles subdirectory
+            Path targetLocation = uploadPath.resolve("profiles").resolve(filename);
+            log.debug("[FILE-STORAGE-SERVICE] [STORE-PROFILE-PICTURE] Target location: {}", targetLocation);
+
+            // Copy file to target location
+            Files.copy(file.getInputStream(), targetLocation, StandardCopyOption.REPLACE_EXISTING);
+            log.info("[FILE-STORAGE-SERVICE] [STORE-PROFILE-PICTURE] File copied successfully to: {}", targetLocation);
+
+            // Return public URL for accessing the file
+            String publicUrlPath = publicUrl + "profiles/" + filename;
+            log.info("[FILE-STORAGE-SERVICE] [STORE-PROFILE-PICTURE] Completed - Public URL: {}", publicUrlPath);
+            return publicUrlPath;
+
+        } catch (Exception e) {
+            log.error("[FILE-STORAGE-SERVICE] [STORE-PROFILE-PICTURE] ERROR for student ID {}: {}",
+                    studentId, e.getMessage(), e);
+            throw e;
         }
-
-        // Get original filename and extension
-        String originalFilename = file.getOriginalFilename();
-        String fileExtension = getFileExtension(originalFilename);
-
-        // Generate unique filename
-        String filename = "profile_" + studentId + "_" + UUID.randomUUID() + fileExtension;
-
-        // Store in profiles subdirectory
-        Path targetLocation = uploadPath.resolve("profiles").resolve(filename);
-
-        // Copy file to target location
-        Files.copy(file.getInputStream(), targetLocation, StandardCopyOption.REPLACE_EXISTING);
-
-        log.info("Profile picture stored: {} for student {}", targetLocation, studentId);
-
-        // Return public URL for accessing the file
-        return publicUrl + "profiles/" + filename;
     }
 
     /**
      * Store achievement certificate and return public URL
      */
     public String storeCertificate(MultipartFile file, Long achievementId) throws IOException {
-        // Validate file is not empty
-        if (file.isEmpty()) {
-            throw new RuntimeException("Failed to store empty file");
+        log.info("[FILE-STORAGE-SERVICE] [STORE-CERTIFICATE] Started - Achievement ID: {}", achievementId);
+        log.debug("[FILE-STORAGE-SERVICE] [STORE-CERTIFICATE] File details - Name: {}, Size: {} bytes",
+                file.getOriginalFilename(), file.getSize());
+
+        try {
+            // Validate file is not empty
+            if (file.isEmpty()) {
+                log.error("[FILE-STORAGE-SERVICE] [STORE-CERTIFICATE] ERROR - Empty file provided");
+                throw new RuntimeException("Failed to store empty file");
+            }
+
+            // Get original filename and extension
+            String originalFilename = file.getOriginalFilename();
+            String fileExtension = getFileExtension(originalFilename);
+            log.debug("[FILE-STORAGE-SERVICE] [STORE-CERTIFICATE] Original filename: {}, Extension: {}",
+                    originalFilename, fileExtension);
+
+            // Generate unique filename
+            String filename = "certificate_" + achievementId + "_" + UUID.randomUUID() + fileExtension;
+            log.debug("[FILE-STORAGE-SERVICE] [STORE-CERTIFICATE] Generated filename: {}", filename);
+
+            // Store in certificates subdirectory
+            Path targetLocation = uploadPath.resolve("certificates").resolve(filename);
+            log.debug("[FILE-STORAGE-SERVICE] [STORE-CERTIFICATE] Target location: {}", targetLocation);
+
+            // Copy file to target location
+            Files.copy(file.getInputStream(), targetLocation, StandardCopyOption.REPLACE_EXISTING);
+            log.info("[FILE-STORAGE-SERVICE] [STORE-CERTIFICATE] File copied successfully to: {}", targetLocation);
+
+            // Return public URL for accessing the file
+            String publicUrlPath = publicUrl + "certificates/" + filename;
+            log.info("[FILE-STORAGE-SERVICE] [STORE-CERTIFICATE] Completed - Public URL: {}", publicUrlPath);
+            return publicUrlPath;
+
+        } catch (Exception e) {
+            log.error("[FILE-STORAGE-SERVICE] [STORE-CERTIFICATE] ERROR for achievement ID {}: {}",
+                    achievementId, e.getMessage(), e);
+            throw e;
         }
-
-        // Get original filename and extension
-        String originalFilename = file.getOriginalFilename();
-        String fileExtension = getFileExtension(originalFilename);
-
-        // Generate unique filename
-        String filename = "certificate_" + achievementId + "_" + UUID.randomUUID() + fileExtension;
-
-        // Store in certificates subdirectory
-        Path targetLocation = uploadPath.resolve("certificates").resolve(filename);
-
-        // Copy file to target location
-        Files.copy(file.getInputStream(), targetLocation, StandardCopyOption.REPLACE_EXISTING);
-
-        log.info("Certificate stored: {} for achievement {}", targetLocation, achievementId);
-
-        // Return public URL for accessing the file
-        return publicUrl + "certificates/" + filename;
     }
 
     /**
      * Store any document and return public URL
      */
     public String storeDocument(MultipartFile file, String category) throws IOException {
-        // Validate file is not empty
-        if (file.isEmpty()) {
-            throw new RuntimeException("Failed to store empty file");
+        log.info("[FILE-STORAGE-SERVICE] [STORE-DOCUMENT] Started - Category: {}", category);
+        log.debug("[FILE-STORAGE-SERVICE] [STORE-DOCUMENT] File details - Name: {}, Size: {} bytes",
+                file.getOriginalFilename(), file.getSize());
+
+        try {
+            // Validate file is not empty
+            if (file.isEmpty()) {
+                log.error("[FILE-STORAGE-SERVICE] [STORE-DOCUMENT] ERROR - Empty file provided");
+                throw new RuntimeException("Failed to store empty file");
+            }
+
+            // Get original filename and extension
+            String originalFilename = file.getOriginalFilename();
+            String fileExtension = getFileExtension(originalFilename);
+            log.debug("[FILE-STORAGE-SERVICE] [STORE-DOCUMENT] Original filename: {}, Extension: {}",
+                    originalFilename, fileExtension);
+
+            // Generate unique filename
+            String filename = category + "_" + UUID.randomUUID() + fileExtension;
+            log.debug("[FILE-STORAGE-SERVICE] [STORE-DOCUMENT] Generated filename: {}", filename);
+
+            // Store in documents subdirectory
+            Path targetLocation = uploadPath.resolve("documents").resolve(filename);
+            log.debug("[FILE-STORAGE-SERVICE] [STORE-DOCUMENT] Target location: {}", targetLocation);
+
+            // Copy file to target location
+            Files.copy(file.getInputStream(), targetLocation, StandardCopyOption.REPLACE_EXISTING);
+            log.info("[FILE-STORAGE-SERVICE] [STORE-DOCUMENT] File copied successfully to: {}", targetLocation);
+
+            // Return public URL for accessing the file
+            String publicUrlPath = publicUrl + "documents/" + filename;
+            log.info("[FILE-STORAGE-SERVICE] [STORE-DOCUMENT] Completed - Public URL: {}", publicUrlPath);
+            return publicUrlPath;
+
+        } catch (Exception e) {
+            log.error("[FILE-STORAGE-SERVICE] [STORE-DOCUMENT] ERROR for category {}: {}", category, e.getMessage(), e);
+            throw e;
         }
-
-        // Get original filename and extension
-        String originalFilename = file.getOriginalFilename();
-        String fileExtension = getFileExtension(originalFilename);
-
-        // Generate unique filename
-        String filename = category + "_" + UUID.randomUUID() + fileExtension;
-
-        // Store in documents subdirectory
-        Path targetLocation = uploadPath.resolve("documents").resolve(filename);
-
-        // Copy file to target location
-        Files.copy(file.getInputStream(), targetLocation, StandardCopyOption.REPLACE_EXISTING);
-
-        log.info("Document stored: {} in category {}", targetLocation, category);
-
-        // Return public URL for accessing the file
-        return publicUrl + "documents/" + filename;
     }
 
     /**
      * Get file extension from filename
      */
     private String getFileExtension(String filename) {
+        log.trace("[FILE-STORAGE-SERVICE] [GET-FILE-EXTENSION] Getting extension for filename: {}", filename);
+
         if (filename == null || filename.lastIndexOf(".") == -1) {
+            log.warn("[FILE-STORAGE-SERVICE] [GET-FILE-EXTENSION] No extension found, defaulting to .jpg");
             return ".jpg"; // Default extension for images
         }
+
         String extension = filename.substring(filename.lastIndexOf("."));
+
         // Ensure extension is valid
         if (extension.length() > 10) { // Sanity check
+            log.warn("[FILE-STORAGE-SERVICE] [GET-FILE-EXTENSION] Extension too long ({}), defaulting to .jpg", extension.length());
             return ".jpg";
         }
-        return extension.toLowerCase();
+
+        String lowerExtension = extension.toLowerCase();
+        log.trace("[FILE-STORAGE-SERVICE] [GET-FILE-EXTENSION] Extension: {}", lowerExtension);
+        return lowerExtension;
     }
 
     /**
      * Get profiles directory path
      */
     public Path getProfilesPath() {
-        return uploadPath.resolve("profiles");
+        Path profilesPath = uploadPath.resolve("profiles");
+        log.trace("[FILE-STORAGE-SERVICE] [GET-PROFILES-PATH] Returning: {}", profilesPath);
+        return profilesPath;
     }
 
     /**
      * Get certificates directory path
      */
     public Path getCertificatesPath() {
-        return uploadPath.resolve("certificates");
+        Path certificatesPath = uploadPath.resolve("certificates");
+        log.trace("[FILE-STORAGE-SERVICE] [GET-CERTIFICATES-PATH] Returning: {}", certificatesPath);
+        return certificatesPath;
     }
 
     /**
      * Check if a file exists
      */
     public boolean fileExists(String filename, String subdirectory) {
+        log.debug("[FILE-STORAGE-SERVICE] [FILE-EXISTS] Checking - Filename: {}, Subdirectory: {}",
+                filename, subdirectory);
+
         Path filePath = uploadPath.resolve(subdirectory).resolve(filename);
-        return Files.exists(filePath);
+        boolean exists = Files.exists(filePath);
+
+        log.debug("[FILE-STORAGE-SERVICE] [FILE-EXISTS] Result: {} - Path: {}", exists, filePath);
+        return exists;
     }
 
     /**
      * Delete a file
      */
     public boolean deleteFile(String filename, String subdirectory) throws IOException {
+        log.info("[FILE-STORAGE-SERVICE] [DELETE-FILE] Started - Filename: {}, Subdirectory: {}",
+                filename, subdirectory);
+
         Path filePath = uploadPath.resolve(subdirectory).resolve(filename);
-        return Files.deleteIfExists(filePath);
+        log.debug("[FILE-STORAGE-SERVICE] [DELETE-FILE] File path: {}", filePath);
+
+        boolean deleted = Files.deleteIfExists(filePath);
+
+        if (deleted) {
+            log.info("[FILE-STORAGE-SERVICE] [DELETE-FILE] Completed - File deleted: {}", filePath);
+        } else {
+            log.warn("[FILE-STORAGE-SERVICE] [DELETE-FILE] File not found: {}", filePath);
+        }
+
+        return deleted;
     }
 }

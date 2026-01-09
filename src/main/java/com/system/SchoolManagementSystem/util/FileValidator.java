@@ -28,16 +28,22 @@ public class FileValidator {
      * Validate image file
      */
     public static void validateImageFile(MultipartFile file) {
+        logValidationStart("image", file);
+
         if (file == null || file.isEmpty()) {
+            logValidationError("File is empty or null");
             throw new RuntimeException("File is empty or null");
         }
 
-        if (file.getSize() > MAX_FILE_SIZE) {
+        long fileSize = file.getSize();
+        if (fileSize > MAX_FILE_SIZE) {
+            logValidationError("File size exceeds 10MB limit. Size: " + fileSize + " bytes");
             throw new RuntimeException("File size exceeds 10MB limit");
         }
 
         String contentType = file.getContentType();
         if (contentType == null || !ALLOWED_IMAGE_TYPES.contains(contentType.toLowerCase())) {
+            logValidationError("Invalid file type. Only JPG, PNG, GIF, WEBP are allowed. Got: " + contentType);
             throw new RuntimeException(
                     "Invalid file type. Only JPG, PNG, GIF, WEBP are allowed. Got: " + contentType
             );
@@ -46,24 +52,33 @@ public class FileValidator {
         // Validate filename
         String filename = file.getOriginalFilename();
         if (filename == null || filename.contains("..")) {
+            logValidationError("Invalid filename: " + filename);
             throw new RuntimeException("Invalid filename");
         }
+
+        logValidationSuccess("image", file);
     }
 
     /**
      * Validate document file
      */
     public static void validateDocumentFile(MultipartFile file) {
+        logValidationStart("document", file);
+
         if (file == null || file.isEmpty()) {
+            logValidationError("File is empty or null");
             throw new RuntimeException("File is empty or null");
         }
 
-        if (file.getSize() > MAX_FILE_SIZE) {
+        long fileSize = file.getSize();
+        if (fileSize > MAX_FILE_SIZE) {
+            logValidationError("File size exceeds 10MB limit. Size: " + fileSize + " bytes");
             throw new RuntimeException("File size exceeds 10MB limit");
         }
 
         String contentType = file.getContentType();
         if (contentType == null || !ALLOWED_DOCUMENT_TYPES.contains(contentType.toLowerCase())) {
+            logValidationError("Invalid file type. Only PDF, DOC, DOCX, XLS, XLSX are allowed. Got: " + contentType);
             throw new RuntimeException(
                     "Invalid file type. Only PDF, DOC, DOCX, XLS, XLSX are allowed. Got: " + contentType
             );
@@ -72,8 +87,27 @@ public class FileValidator {
         // Validate filename
         String filename = file.getOriginalFilename();
         if (filename == null || filename.contains("..")) {
+            logValidationError("Invalid filename: " + filename);
             throw new RuntimeException("Invalid filename");
         }
+
+        logValidationSuccess("document", file);
+    }
+
+    private static void logValidationStart(String fileType, MultipartFile file) {
+        System.out.println("[FILE-VALIDATOR] [VALIDATE-" + fileType.toUpperCase() + "] Started - " +
+                "Filename: " + file.getOriginalFilename() + ", " +
+                "Size: " + file.getSize() + " bytes, " +
+                "Content-Type: " + file.getContentType());
+    }
+
+    private static void logValidationSuccess(String fileType, MultipartFile file) {
+        System.out.println("[FILE-VALIDATOR] [VALIDATE-" + fileType.toUpperCase() + "] SUCCESS - " +
+                "File validated: " + file.getOriginalFilename());
+    }
+
+    private static void logValidationError(String message) {
+        System.err.println("[FILE-VALIDATOR] [VALIDATION-ERROR] " + message);
     }
 
     /**

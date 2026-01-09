@@ -60,4 +60,13 @@ public class StudentUpdateDTO {
     private List<MedicalRecordDTO> medicalRecords;
     private List<AchievementDTO> achievements;
     private List<StudentInterestDTO> interests;
+
+    // Add fee fields
+    private Double totalFee;
+    private Double tuitionFee;
+    private Double admissionFee;
+    private Double examinationFee;
+    private Double otherFees;
+    private Double paidAmount;
+    private Double pendingAmount;
 }

@@ -5,7 +5,8 @@ import jakarta.persistence.*;
 import lombok.*;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 
 @Entity
 @Table(name = "students")
@@ -13,12 +14,17 @@ import java.util.List;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@EqualsAndHashCode(onlyExplicitlyIncluded = true)
+@ToString(exclude = {"familyMembers", "medicalRecords", "achievements", "interests"})
 public class Student {
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @EqualsAndHashCode.Include
     private Long id;
 
     @Column(name = "student_id", unique = true, nullable = false, length = 20)
+    @EqualsAndHashCode.Include
     private String studentId;
 
     @Column(name = "full_name", nullable = false, length = 100)
@@ -118,13 +124,41 @@ public class Student {
     @Column(name = "drop_time")
     private String dropTime;
 
-    // FIXED: Removed precision and scale for Double
     @Column(name = "transport_fee")
     private Double transportFee;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "transport_fee_status")
     private FeeStatus transportFeeStatus = FeeStatus.PENDING;
+
+    // ========== FEE INFORMATION (NEW) ==========
+    @Column(name = "total_fee")
+    private Double totalFee;
+
+    @Column(name = "paid_amount")
+    @Builder.Default
+    private Double paidAmount = 0.0;
+
+    @Column(name = "pending_amount")
+    private Double pendingAmount;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "fee_status")
+    @Builder.Default
+    private FeeStatus feeStatus = FeeStatus.PENDING;
+
+    @Column(name = "tuition_fee")
+    private Double tuitionFee;
+
+    @Column(name = "admission_fee")
+    private Double admissionFee;
+
+    @Column(name = "examination_fee")
+    private Double examinationFee;
+
+    @Column(name = "other_fees")
+    private Double otherFees;
+    // ===========================================
 
     // Status
     @Enumerated(EnumType.STRING)
@@ -138,29 +172,48 @@ public class Student {
     // Relationships
     @OneToMany(mappedBy = "student", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     @JsonIgnore
-    private List<FamilyMember> familyMembers;
+    @Builder.Default
+    private Set<FamilyMember> familyMembers = new HashSet<>();
 
     @OneToMany(mappedBy = "student", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     @JsonIgnore
-    private List<MedicalRecord> medicalRecords;
+    @Builder.Default
+    private Set<MedicalRecord> medicalRecords = new HashSet<>();
 
     @OneToMany(mappedBy = "student", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     @JsonIgnore
-    private List<Achievement> achievements;
+    @Builder.Default
+    private Set<Achievement> achievements = new HashSet<>();
 
     @OneToMany(mappedBy = "student", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     @JsonIgnore
-    private List<StudentInterest> interests;
+    @Builder.Default
+    private Set<StudentInterest> interests = new HashSet<>();
 
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
         updatedAt = LocalDateTime.now();
+        calculateFeeDetails();
     }
 
     @PreUpdate
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
+        calculateFeeDetails();
+    }
+
+    private void calculateFeeDetails() {
+        if (totalFee != null && paidAmount != null) {
+            this.pendingAmount = Math.max(0, totalFee - paidAmount);
+            if (paidAmount >= totalFee) {
+                this.feeStatus = FeeStatus.PAID;
+            } else if (paidAmount > 0) {
+                this.feeStatus = FeeStatus.PENDING;
+            } else {
+                this.feeStatus = FeeStatus.PENDING;
+            }
+        }
     }
 
     public enum Gender {
