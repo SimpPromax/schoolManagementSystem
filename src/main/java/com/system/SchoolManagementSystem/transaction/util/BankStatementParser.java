@@ -2,6 +2,7 @@ package com.system.SchoolManagementSystem.transaction.util;
 
 import com.system.SchoolManagementSystem.transaction.entity.BankTransaction;
 import com.system.SchoolManagementSystem.transaction.enums.PaymentMethod;
+import com.system.SchoolManagementSystem.transaction.enums.TransactionStatus;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
@@ -25,6 +26,7 @@ public class BankStatementParser {
     private static final List<String> AMOUNT_COLUMNS = Arrays.asList("amount", "transaction amount", "debit", "credit");
     private static final List<String> DESC_COLUMNS = Arrays.asList("description", "narration", "particulars", "remarks");
     private static final List<String> REF_COLUMNS = Arrays.asList("reference", "ref no", "transaction id", "cheque no");
+    private static final List<String> STATUS_COLUMNS = Arrays.asList("status", "transaction status");
 
     public static List<BankTransaction> parseCsv(MultipartFile file, String bankAccount) throws IOException {
         List<BankTransaction> transactions = new ArrayList<>();
@@ -95,6 +97,7 @@ public class BankStatementParser {
         String amountStr = getValueFromRecord(record, headerMap, AMOUNT_COLUMNS);
         String description = getValueFromRecord(record, headerMap, DESC_COLUMNS);
         String reference = getValueFromRecord(record, headerMap, REF_COLUMNS);
+        String statusStr = getValueFromRecord(record, headerMap, STATUS_COLUMNS);
 
         if (dateStr == null || amountStr == null || description == null) {
             return null;
@@ -105,12 +108,18 @@ public class BankStatementParser {
             Double amount = parseAmount(amountStr);
             PaymentMethod paymentMethod = detectPaymentMethod(description);
 
+            // Parse status if provided in CSV, otherwise default to UNVERIFIED
+            TransactionStatus status = parseTransactionStatus(statusStr);
+
+            log.debug("Creating transaction with status: {}", status);
+
             return BankTransaction.builder()
                     .bankReference(reference != null ? reference : generateReference())
                     .transactionDate(date)
                     .description(description.trim())
                     .amount(amount)
                     .bankAccount(bankAccount)
+                    .status(status) // Explicitly set status
                     .paymentMethod(paymentMethod)
                     .fileName("CSV Import")
                     .importBatchId(importBatchId)
@@ -127,6 +136,7 @@ public class BankStatementParser {
         String amountStr = getValueFromRow(row, headerMap, AMOUNT_COLUMNS);
         String description = getValueFromRow(row, headerMap, DESC_COLUMNS);
         String reference = getValueFromRow(row, headerMap, REF_COLUMNS);
+        String statusStr = getValueFromRow(row, headerMap, STATUS_COLUMNS);
 
         if (dateStr == null || amountStr == null || description == null) {
             return null;
@@ -137,12 +147,18 @@ public class BankStatementParser {
             Double amount = parseAmount(amountStr);
             PaymentMethod paymentMethod = detectPaymentMethod(description);
 
+            // Parse status if provided in Excel, otherwise default to UNVERIFIED
+            TransactionStatus status = parseTransactionStatus(statusStr);
+
+            log.debug("Creating transaction with status: {}", status);
+
             return BankTransaction.builder()
                     .bankReference(reference != null ? reference : generateReference())
                     .transactionDate(date)
                     .description(description.trim())
                     .amount(amount)
                     .bankAccount(bankAccount)
+                    .status(status) // Explicitly set status
                     .paymentMethod(paymentMethod)
                     .fileName("Excel Import")
                     .importBatchId(importBatchId)
@@ -246,6 +262,42 @@ public class BankStatementParser {
         if (desc.contains("cheque") || desc.contains("chq")) return PaymentMethod.CHEQUE;
         if (desc.contains("online")) return PaymentMethod.ONLINE_BANKING;
         return PaymentMethod.BANK_TRANSFER;
+    }
+
+    private static TransactionStatus parseTransactionStatus(String statusStr) {
+        if (statusStr == null || statusStr.trim().isEmpty()) {
+            return TransactionStatus.UNVERIFIED; // Default status
+        }
+
+        try {
+            String upperStatus = statusStr.trim().toUpperCase();
+            // Handle various status string formats
+            switch (upperStatus) {
+                case "UNVERIFIED":
+                case "PENDING":
+                case "NEW":
+                    return TransactionStatus.UNVERIFIED;
+                case "VERIFIED":
+                case "COMPLETED":
+                case "PAID":
+                    return TransactionStatus.VERIFIED;
+                case "MATCHED":
+                case "PROCESSED":
+                    return TransactionStatus.MATCHED;
+                case "UNMATCHED":
+                    return TransactionStatus.UNMATCHED;
+                case "CANCELLED":
+                case "FAILED":
+                case "REJECTED":
+                    return TransactionStatus.CANCELLED;
+                default:
+                    log.warn("Unknown status value '{}', defaulting to UNVERIFIED", statusStr);
+                    return TransactionStatus.UNVERIFIED;
+            }
+        } catch (Exception e) {
+            log.error("Error parsing transaction status: {}", statusStr, e);
+            return TransactionStatus.UNVERIFIED;
+        }
     }
 
     private static String generateReference() {

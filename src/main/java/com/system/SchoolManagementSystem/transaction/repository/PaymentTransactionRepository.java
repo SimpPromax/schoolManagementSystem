@@ -49,4 +49,6 @@ public interface PaymentTransactionRepository extends JpaRepository<PaymentTrans
             "LOWER(pt.student.fullName) LIKE LOWER(CONCAT('%', :search, '%')) OR " +
             "LOWER(pt.bankReference) LIKE LOWER(CONCAT('%', :search, '%')))")
     Page<PaymentTransaction> searchTransactions(@Param("search") String search, Pageable pageable);
+
+    Long countByIsVerified(Boolean isVerified);
 }

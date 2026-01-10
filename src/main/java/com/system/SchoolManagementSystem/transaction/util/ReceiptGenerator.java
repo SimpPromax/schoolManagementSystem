@@ -5,13 +5,16 @@ import com.lowagie.text.Font;
 import com.lowagie.text.Rectangle;
 import com.lowagie.text.pdf.*;
 import com.system.SchoolManagementSystem.student.entity.Student;
+import com.system.SchoolManagementSystem.transaction.entity.BankTransaction;
 import com.system.SchoolManagementSystem.transaction.entity.PaymentTransaction;
+import com.system.SchoolManagementSystem.transaction.enums.TransactionStatus;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.awt.*;
 import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Field;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
 @Slf4j
@@ -19,28 +22,48 @@ import java.time.format.DateTimeFormatter;
 public class ReceiptGenerator {
 
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("dd MMMM yyyy, hh:mm a");
+    private static final DateTimeFormatter SIMPLE_DATE_FORMATTER = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
     // Color definitions
     private static final Color LIGHT_GRAY = new Color(240, 240, 240);
     private static final Color LIGHT_YELLOW = new Color(255, 255, 200);
+    private static final Color LIGHT_PURPLE = new Color(245, 240, 255);
     private static final Color BLUE = new Color(0, 102, 204);
+    private static final Color PURPLE = new Color(138, 43, 226);
     private static final Color GREEN = new Color(34, 139, 34);
     private static final Color DARK_BLUE = new Color(0, 0, 139);
     private static final Color DARK_GRAY = new Color(64, 64, 64);
     private static final Color GRAY = new Color(128, 128, 128);
     private static final Color RED = new Color(255, 0, 0);
     private static final Color DISCOUNT_GREEN = new Color(0, 128, 0);
+    private static final Color AUTO_MATCHED_PURPLE = new Color(147, 51, 234);
+    private static final Color AUTO_MATCHED_BG = new Color(245, 240, 255);
 
-    public byte[] generateReceiptPdf(PaymentTransaction transaction) {
+    public byte[] generateReceiptPdf(Object transaction) {
         if (transaction == null) {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
+
+        log.info("📄 Generating receipt for transaction type: {}", transaction.getClass().getSimpleName());
+
+        // Handle both PaymentTransaction and BankTransaction
+        if (transaction instanceof PaymentTransaction) {
+            return generateReceiptFromPaymentTransaction((PaymentTransaction) transaction);
+        } else if (transaction instanceof BankTransaction) {
+            return generateReceiptFromBankTransaction((BankTransaction) transaction);
+        } else {
+            throw new IllegalArgumentException("Unsupported transaction type: " + transaction.getClass().getName());
+        }
+    }
+
+    private byte[] generateReceiptFromPaymentTransaction(PaymentTransaction transaction) {
+        log.info("📄 Generating receipt for verified payment: {}", transaction.getReceiptNumber());
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         Document document = new Document(PageSize.A4);
 
         try {
-            PdfWriter.getInstance(document, baos);
+            PdfWriter writer = PdfWriter.getInstance(document, baos);
             document.open();
 
             Student student = transaction.getStudent();
@@ -178,6 +201,18 @@ public class ReceiptGenerator {
                 document.add(smsPara);
             }
 
+            // Verification Info
+            if (transaction.getVerifiedAt() != null) {
+                Font verifyFont = FontFactory.getFont(FontFactory.HELVETICA, 8);
+                verifyFont.setColor(GRAY);
+                Paragraph verifyPara = new Paragraph(
+                        "Verified on: " + DATE_FORMATTER.format(transaction.getVerifiedAt()),
+                        verifyFont
+                );
+                verifyPara.setAlignment(Element.ALIGN_LEFT);
+                document.add(verifyPara);
+            }
+
             document.add(new Paragraph(" ")); // Empty line
 
             // Footer
@@ -192,7 +227,7 @@ public class ReceiptGenerator {
             thankYouFont.setColor(GREEN);
             addCenteredParagraph(document, "Thank you for your payment!", thankYouFont);
 
-            log.info("Generated receipt PDF for transaction: {}", transaction.getReceiptNumber());
+            log.info("✅ Generated receipt PDF for payment transaction: {}", transaction.getReceiptNumber());
 
         } catch (DocumentException e) {
             log.error("Document error while generating receipt for transaction: {}",
@@ -203,6 +238,252 @@ public class ReceiptGenerator {
         }
 
         return baos.toByteArray();
+    }
+
+    private byte[] generateReceiptFromBankTransaction(BankTransaction transaction) {
+        log.info("📄 Generating receipt for bank transaction: {}", transaction.getBankReference());
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        Document document = new Document(PageSize.A4);
+
+        try {
+            PdfWriter writer = PdfWriter.getInstance(document, baos);
+            document.open();
+
+            Student student = transaction.getStudent();
+            if (student == null) {
+                throw new IllegalArgumentException("Bank transaction must have a student assigned to generate receipt");
+            }
+
+            // Add AUTO-MATCHED watermark for matched transactions
+            if (transaction.getStatus() == TransactionStatus.MATCHED) {
+                addAutoMatchedWatermark(writer);
+            }
+
+            // School Header
+            Font schoolTitleFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 18);
+            schoolTitleFont.setColor(BLUE);
+            addCenteredParagraph(document, "SCHOOL MANAGEMENT SYSTEM", schoolTitleFont);
+
+            Font addressFont = FontFactory.getFont(FontFactory.HELVETICA, 10);
+            addressFont.setColor(DARK_GRAY);
+            addCenteredParagraph(document, "Bank Payment Receipt", addressFont);
+
+            document.add(new Paragraph(" ")); // Empty line
+
+            // Title - Different for auto-matched vs verified
+            Font receiptTitleFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 16);
+            if (transaction.getStatus() == TransactionStatus.MATCHED) {
+                receiptTitleFont.setColor(PURPLE);
+                addCenteredParagraph(document, "AUTO-MATCHED PAYMENT RECEIPT", receiptTitleFont);
+
+                // Add auto-matched badge
+                Font autoMatchedFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 10);
+                autoMatchedFont.setColor(PURPLE);
+                Paragraph autoMatchedPara = new Paragraph("System Auto-Matched", autoMatchedFont);
+                autoMatchedPara.setAlignment(Element.ALIGN_CENTER);
+                document.add(autoMatchedPara);
+            } else {
+                receiptTitleFont.setColor(GREEN);
+                addCenteredParagraph(document, "VERIFIED BANK PAYMENT RECEIPT", receiptTitleFont);
+            }
+
+            addCenteredParagraph(document, "____________________________", FontFactory.getFont(FontFactory.HELVETICA, 10));
+
+            document.add(new Paragraph(" ")); // Empty line
+
+            // Transaction Details Table
+            PdfPTable detailsTable = new PdfPTable(2);
+            detailsTable.setWidthPercentage(100);
+            detailsTable.setSpacingBefore(10f);
+            detailsTable.setSpacingAfter(10f);
+
+            float[] columnWidths = {30f, 70f};
+            detailsTable.setWidths(columnWidths);
+
+            // Different header color for auto-matched
+            Color headerColor = transaction.getStatus() == TransactionStatus.MATCHED ?
+                    AUTO_MATCHED_BG : LIGHT_GRAY;
+            addTableHeaderCell(detailsTable, "TRANSACTION DETAILS", 2, headerColor);
+
+            addTableRow(detailsTable, "Bank Reference:", transaction.getBankReference());
+            addTableRow(detailsTable, "Transaction Date:",
+                    transaction.getTransactionDate().format(SIMPLE_DATE_FORMATTER));
+            addTableRow(detailsTable, "Student Name:", getStudentFullName(student));
+            addTableRow(detailsTable, "Grade/Class:", getStudentGrade(student));
+            addTableRow(detailsTable, "Student ID:", getStudentId(student));
+            addTableRow(detailsTable, "Roll Number:", getStudentRollNumber(student));
+
+            document.add(detailsTable);
+
+            // Payment Details Table
+            PdfPTable paymentTable = new PdfPTable(2);
+            paymentTable.setWidthPercentage(100);
+            paymentTable.setSpacingBefore(10f);
+            paymentTable.setSpacingAfter(10f);
+            paymentTable.setWidths(columnWidths);
+
+            addTableHeaderCell(paymentTable, "PAYMENT INFORMATION", 2, headerColor);
+
+            // Amount row
+            addTableRow(paymentTable, "Transaction Amount:", formatCurrency(transaction.getAmount()));
+
+            // Bank Account
+            if (transaction.getBankAccount() != null && !transaction.getBankAccount().trim().isEmpty()) {
+                addTableRow(paymentTable, "Bank Account:", transaction.getBankAccount());
+            }
+
+            // Payment Method
+            String paymentMethod = transaction.getPaymentMethod() != null ?
+                    formatPaymentMethod(transaction.getPaymentMethod()) : "Bank Transfer";
+            addTableRow(paymentTable, "Payment Method:", paymentMethod);
+
+            // Description
+            if (transaction.getDescription() != null && !transaction.getDescription().trim().isEmpty()) {
+                addTableRow(paymentTable, "Description:", transaction.getDescription());
+            }
+
+            // Status
+            addTableRow(paymentTable, "Status:",
+                    transaction.getStatus() == TransactionStatus.MATCHED ? "Auto-Matched" : "Verified");
+
+            // Add empty row before total
+            addEmptyTableRow(paymentTable, 2);
+
+            // Total row with special styling
+            Font totalFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 12);
+            totalFont.setColor(transaction.getStatus() == TransactionStatus.MATCHED ? PURPLE : DARK_BLUE);
+
+            PdfPCell totalLabelCell = new PdfPCell(new Phrase("TOTAL RECEIVED AMOUNT:", totalFont));
+            totalLabelCell.setBorder(0);
+            totalLabelCell.setPadding(8);
+            totalLabelCell.setBackgroundColor(
+                    transaction.getStatus() == TransactionStatus.MATCHED ? LIGHT_PURPLE : LIGHT_YELLOW
+            );
+            paymentTable.addCell(totalLabelCell);
+
+            PdfPCell totalValueCell = new PdfPCell(new Phrase(formatCurrency(transaction.getAmount()), totalFont));
+            totalValueCell.setBorder(0);
+            totalValueCell.setPadding(8);
+            totalValueCell.setBackgroundColor(
+                    transaction.getStatus() == TransactionStatus.MATCHED ? LIGHT_PURPLE : LIGHT_YELLOW
+            );
+            paymentTable.addCell(totalValueCell);
+
+            // Import/Verification Info
+            addTableRow(paymentTable, "Imported On:",
+                    transaction.getImportedAt().format(SIMPLE_DATE_FORMATTER));
+
+            if (transaction.getMatchedAt() != null) {
+                addTableRow(paymentTable, "Matched On:",
+                        transaction.getMatchedAt().format(SIMPLE_DATE_FORMATTER));
+            }
+
+            document.add(paymentTable);
+
+            // Important Notes Section
+            Paragraph notesPara = new Paragraph();
+            notesPara.setSpacingBefore(15f);
+
+            Font notesTitleFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 10);
+            notesTitleFont.setColor(DARK_GRAY);
+            notesPara.add(new Chunk("Important Notes:\n", notesTitleFont));
+
+            Font notesContentFont = FontFactory.getFont(FontFactory.HELVETICA, 9);
+            notesContentFont.setColor(GRAY);
+
+            if (transaction.getStatus() == TransactionStatus.MATCHED) {
+                notesPara.add(new Chunk(
+                        "• This payment was automatically matched by the system.\n" +
+                                "• Please keep this receipt for your records.\n" +
+                                "• Contact school administration for any discrepancies.\n",
+                        notesContentFont
+                ));
+            } else {
+                notesPara.add(new Chunk(
+                        "• This payment has been verified and recorded.\n" +
+                                "• Please keep this receipt for your records.\n" +
+                                "• Contact school administration for any queries.\n",
+                        notesContentFont
+                ));
+            }
+
+            document.add(notesPara);
+
+            document.add(new Paragraph(" ")); // Empty line
+
+            // Footer
+            Font footerFont = FontFactory.getFont(FontFactory.HELVETICA, 8);
+            footerFont.setColor(GRAY);
+            addCenteredParagraph(document, "This is a computer-generated receipt.", footerFont);
+            addCenteredParagraph(document, "Valid without signature", footerFont);
+
+            document.add(new Paragraph(" ")); // Empty line
+
+            Font thankYouFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 11);
+            thankYouFont.setColor(transaction.getStatus() == TransactionStatus.MATCHED ? PURPLE : GREEN);
+
+            if (transaction.getStatus() == TransactionStatus.MATCHED) {
+                addCenteredParagraph(document, "Payment Auto-Matched Successfully!", thankYouFont);
+            } else {
+                addCenteredParagraph(document, "Bank Payment Verified Successfully!", thankYouFont);
+            }
+
+            log.info("✅ Generated receipt PDF for bank transaction: {}", transaction.getBankReference());
+
+        } catch (DocumentException e) {
+            log.error("Document error while generating receipt for bank transaction: {}",
+                    transaction.getBankReference(), e);
+            throw new RuntimeException("Failed to generate receipt", e);
+        } finally {
+            document.close();
+        }
+
+        return baos.toByteArray();
+    }
+
+    private void addAutoMatchedWatermark(PdfWriter writer) {
+        PdfContentByte canvas = writer.getDirectContentUnder();
+
+        // Add diagonal watermark text
+        canvas.beginText();
+        Font watermarkFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 60);
+        watermarkFont.setColor(new Color(147, 51, 234, 20)); // Light purple with transparency
+        canvas.setFontAndSize(watermarkFont.getBaseFont(), 60);
+        canvas.showTextAligned(
+                Element.ALIGN_CENTER,
+                "AUTO-MATCHED",
+                PageSize.A4.getWidth() / 2,
+                PageSize.A4.getHeight() / 2,
+                45
+        );
+        canvas.endText();
+
+        // Add smaller watermark in corners
+        canvas.beginText();
+        Font cornerFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 12);
+        cornerFont.setColor(new Color(147, 51, 234, 15));
+        canvas.setFontAndSize(cornerFont.getBaseFont(), 12);
+
+        // Bottom left
+        canvas.showTextAligned(
+                Element.ALIGN_LEFT,
+                "Auto-Matched",
+                20,
+                20,
+                0
+        );
+
+        // Top right
+        canvas.showTextAligned(
+                Element.ALIGN_RIGHT,
+                "Auto-Matched",
+                PageSize.A4.getWidth() - 20,
+                PageSize.A4.getHeight() - 20,
+                0
+        );
+
+        canvas.endText();
     }
 
     public byte[] generateSimpleReceipt(PaymentTransaction transaction) {

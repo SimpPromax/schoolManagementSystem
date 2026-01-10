@@ -5,6 +5,7 @@ import lombok.Data;
 @Data
 public class TransactionStatisticsResponse {
     private Long unverifiedCount;
+    private Long matchedCount; // Add this field
     private Long verifiedCount;
     private Double totalAmount;
     private Double todayAmount;
@@ -15,6 +16,7 @@ public class TransactionStatisticsResponse {
 
     public TransactionStatisticsResponse() {
         this.unverifiedCount = 0L;
+        this.matchedCount = 0L; // Initialize
         this.verifiedCount = 0L;
         this.totalAmount = 0.0;
         this.todayAmount = 0.0;

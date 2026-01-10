@@ -57,6 +57,7 @@ public class PaymentTransaction {
     @Column(name = "bank_reference", length = 50)
     private String bankReference;
 
+    @Builder.Default
     @Column(name = "is_verified", nullable = false)
     private Boolean isVerified = false;
 
@@ -67,6 +68,7 @@ public class PaymentTransaction {
     @Column(name = "verified_at")
     private LocalDateTime verifiedAt;
 
+    @Builder.Default
     @Column(name = "sms_sent", nullable = false)
     private Boolean smsSent = false;
 
@@ -90,12 +92,15 @@ public class PaymentTransaction {
     @Column(name = "payment_for", length = 100)
     private String paymentFor;
 
+    @Builder.Default
     @Column(name = "discount_applied")
     private Double discountApplied = 0.0;
 
+    @Builder.Default
     @Column(name = "late_fee_paid")
     private Double lateFeePaid = 0.0;
 
+    @Builder.Default
     @Column(name = "convenience_fee")
     private Double convenienceFee = 0.0;
 
@@ -118,6 +123,4 @@ public class PaymentTransaction {
     private void calculateTotal() {
         totalPaid = amount - discountApplied + lateFeePaid + convenienceFee;
     }
-
-
 }
