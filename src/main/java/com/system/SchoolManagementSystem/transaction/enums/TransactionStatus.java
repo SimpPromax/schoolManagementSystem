@@ -6,5 +6,6 @@ public enum TransactionStatus {
     VERIFIED,
     UNMATCHED,
     PENDING,
+    PENDING_REVIEW,
     CANCELLED
 }
