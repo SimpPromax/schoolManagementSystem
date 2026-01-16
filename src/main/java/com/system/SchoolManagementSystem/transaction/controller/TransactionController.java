@@ -4,10 +4,15 @@ import com.system.SchoolManagementSystem.transaction.dto.request.*;
 import com.system.SchoolManagementSystem.transaction.dto.response.*;
 import com.system.SchoolManagementSystem.transaction.enums.TransactionStatus;
 import com.system.SchoolManagementSystem.transaction.service.TransactionService;
+import com.system.SchoolManagementSystem.transaction.service.StudentCacheService;
+import com.system.SchoolManagementSystem.transaction.util.TransactionMatcher;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpHeaders;
@@ -22,16 +27,110 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/transactions")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "http://localhost:3000")
+@Slf4j
 public class TransactionController {
 
     private final TransactionService transactionService;
+    private final StudentCacheService studentCacheService;
+    private final TransactionMatcher transactionMatcher;
 
-    // Bank Transaction Endpoints
+    // ========== OPTIMIZATION ENDPOINTS ==========
+
+    @GetMapping("/optimization/cache/stats")
+    public ResponseEntity<Map<String, Object>> getCacheStats() {
+        try {
+            StudentCacheService.CacheStats stats = transactionService.getCacheStats();
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Cache statistics retrieved successfully");
+            response.put("data", stats);
+            response.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to get cache stats: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    @GetMapping("/optimization/matcher/cache/status")
+    public ResponseEntity<Map<String, Object>> getMatcherCacheStatus() {
+        try {
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("cacheLoaded", transactionMatcher.isCacheLoaded());
+            response.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to get cache status: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    @PostMapping("/optimization/cache/refresh")
+    public ResponseEntity<Map<String, Object>> refreshAllCaches() {
+        try {
+            // Refresh both caches
+            studentCacheService.refreshCache();
+            transactionService.refreshMatcherCache();
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "All caches refresh initiated");
+            response.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to refresh caches: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    @PostMapping("/optimization/matcher/cache/refresh")
+    public ResponseEntity<Map<String, Object>> refreshMatcherCache() {
+        try {
+            transactionService.refreshMatcherCache();
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Transaction matcher cache refresh initiated");
+            response.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to refresh matcher cache: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    // ========== BANK TRANSACTION ENDPOINTS (UPDATED) ==========
 
     @PostMapping("/import")
     public ResponseEntity<Map<String, Object>> importBankTransactions(
@@ -70,24 +169,62 @@ public class TransactionController {
     public ResponseEntity<Map<String, Object>> getBankTransactions(
             @RequestParam(value = "status", required = false) TransactionStatus status,
             @RequestParam(value = "search", required = false) String search,
-            @PageableDefault(size = 20) Pageable pageable) {
+            @RequestParam(value = "all", defaultValue = "false") Boolean all,
+            @RequestParam(value = "fromDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate fromDate,
+            @RequestParam(value = "toDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate toDate,
+            @PageableDefault(size = 50) Pageable pageable) {
 
         try {
-            Page<BankTransactionResponse> transactions = transactionService.getBankTransactions(status, search, pageable);
+            if (Boolean.TRUE.equals(all)) {
+                // ========== RETURN ALL TRANSACTIONS (NO PAGINATION) ==========
+                log.info("Fetching ALL bank transactions (no pagination)");
+                long startTime = System.currentTimeMillis();
 
-            Map<String, Object> response = new HashMap<>();
-            response.put("success", true);
-            response.put("message", "Bank transactions retrieved successfully");
-            response.put("data", transactions.getContent());
-            response.put("page", transactions.getNumber());
-            response.put("size", transactions.getSize());
-            response.put("totalPages", transactions.getTotalPages());
-            response.put("totalElements", transactions.getTotalElements());
-            response.put("timestamp", LocalDateTime.now().toString());
+                List<BankTransactionResponse> allTransactions = transactionService.getAllBankTransactions(
+                        status, search, fromDate, toDate);
 
-            return ResponseEntity.ok(response);
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", true);
+                response.put("message", "All bank transactions retrieved successfully");
+                response.put("data", allTransactions);
+                response.put("total", allTransactions.size());
+                response.put("timestamp", LocalDateTime.now().toString());
+                response.put("paginationEnabled", false);
+                response.put("processingTime", System.currentTimeMillis() - startTime);
+
+                log.info("Returning ALL {} transactions (unpaginated) in {}ms",
+                        allTransactions.size(), System.currentTimeMillis() - startTime);
+                return ResponseEntity.ok(response);
+
+            } else {
+                // ========== ORIGINAL PAGINATED RESPONSE ==========
+                log.info("Fetching paginated bank transactions (page {}, size {})",
+                        pageable.getPageNumber(), pageable.getPageSize());
+
+                Page<BankTransactionResponse> transactions = transactionService.getBankTransactions(
+                        status, search, fromDate, toDate, pageable);
+
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", true);
+                response.put("message", "Bank transactions retrieved successfully");
+                response.put("data", transactions.getContent());
+                response.put("page", transactions.getNumber());
+                response.put("size", transactions.getSize());
+                response.put("totalPages", transactions.getTotalPages());
+                response.put("totalElements", transactions.getTotalElements());
+                response.put("hasNext", transactions.hasNext());
+                response.put("hasPrevious", transactions.hasPrevious());
+                response.put("timestamp", LocalDateTime.now().toString());
+                response.put("paginationEnabled", true);
+
+                log.info("Returning paginated response: {}/{} elements",
+                        transactions.getContent().size(), transactions.getTotalElements());
+
+                return ResponseEntity.ok(response);
+            }
 
         } catch (Exception e) {
+            log.error("❌ Failed to retrieve bank transactions", e);
             Map<String, Object> errorResponse = new HashMap<>();
             errorResponse.put("success", false);
             errorResponse.put("message", "Failed to retrieve bank transactions: " + e.getMessage());
@@ -168,7 +305,7 @@ public class TransactionController {
         }
     }
 
-    // Payment Transaction Endpoints
+    // ========== PAYMENT TRANSACTION ENDPOINTS ==========
 
     @PostMapping("/verify")
     public ResponseEntity<Map<String, Object>> verifyPayment(
@@ -223,22 +360,41 @@ public class TransactionController {
     @GetMapping("/verified")
     public ResponseEntity<Map<String, Object>> getVerifiedTransactions(
             @RequestParam(value = "search", required = false) String search,
-            @PageableDefault(size = 20) Pageable pageable) {
+            @RequestParam(value = "all", defaultValue = "false") Boolean all,
+            @PageableDefault(size = 50) Pageable pageable) {
 
         try {
-            Page<PaymentTransactionResponse> transactions = transactionService.getVerifiedTransactions(search, pageable);
+            if (Boolean.TRUE.equals(all)) {
+                // Return all verified transactions
+                List<PaymentTransactionResponse> allTransactions = transactionService.getAllVerifiedTransactions(search);
 
-            Map<String, Object> response = new HashMap<>();
-            response.put("success", true);
-            response.put("message", "Verified payments retrieved successfully");
-            response.put("data", transactions.getContent());
-            response.put("page", transactions.getNumber());
-            response.put("size", transactions.getSize());
-            response.put("totalPages", transactions.getTotalPages());
-            response.put("totalElements", transactions.getTotalElements());
-            response.put("timestamp", LocalDateTime.now().toString());
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", true);
+                response.put("message", "All verified payments retrieved successfully");
+                response.put("data", allTransactions);
+                response.put("total", allTransactions.size());
+                response.put("timestamp", LocalDateTime.now().toString());
+                response.put("paginationEnabled", false);
 
-            return ResponseEntity.ok(response);
+                return ResponseEntity.ok(response);
+
+            } else {
+                // Paginated response
+                Page<PaymentTransactionResponse> transactions = transactionService.getVerifiedTransactions(search, pageable);
+
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", true);
+                response.put("message", "Verified payments retrieved successfully");
+                response.put("data", transactions.getContent());
+                response.put("page", transactions.getNumber());
+                response.put("size", transactions.getSize());
+                response.put("totalPages", transactions.getTotalPages());
+                response.put("totalElements", transactions.getTotalElements());
+                response.put("timestamp", LocalDateTime.now().toString());
+                response.put("paginationEnabled", true);
+
+                return ResponseEntity.ok(response);
+            }
 
         } catch (Exception e) {
             Map<String, Object> errorResponse = new HashMap<>();
@@ -299,7 +455,7 @@ public class TransactionController {
         }
     }
 
-    // Statistics Endpoints
+    // ========== STATISTICS ENDPOINTS (UPDATED) ==========
 
     @GetMapping("/statistics")
     public ResponseEntity<Map<String, Object>> getTransactionStatistics() {
@@ -350,7 +506,78 @@ public class TransactionController {
         }
     }
 
-    // SMS Endpoints
+    @GetMapping("/statistics/summary")
+    public ResponseEntity<Map<String, Object>> getTransactionSummary() {
+        long startTime = System.currentTimeMillis();
+        try {
+            log.info("Fetching transaction statistics summary");
+
+            Map<String, Object> summary = new HashMap<>();
+
+            // Get counts using repository methods (optimized)
+            long totalTransactions = transactionService.getTotalBankTransactionCount();
+            long unverifiedCount = transactionService.getBankTransactionCountByStatus(TransactionStatus.UNVERIFIED);
+            long pendingCount = transactionService.getBankTransactionCountByStatus(TransactionStatus.PENDING);
+            long matchedCount = transactionService.getBankTransactionCountByStatus(TransactionStatus.MATCHED);
+            long verifiedCount = transactionService.getPaymentTransactionCountVerified();
+            long cancelledCount = transactionService.getBankTransactionCountByStatus(TransactionStatus.CANCELLED);
+
+            summary.put("totalTransactions", totalTransactions);
+            summary.put("unverifiedCount", unverifiedCount);
+            summary.put("pendingCount", pendingCount);
+            summary.put("matchedCount", matchedCount);
+            summary.put("verifiedCount", verifiedCount);
+            summary.put("cancelledCount", cancelledCount);
+
+            // Calculate match rate
+            double processedCount = matchedCount + verifiedCount;
+            String matchRate = totalTransactions > 0 ?
+                    String.format("%.1f%%", (processedCount / totalTransactions) * 100) : "0%";
+            summary.put("matchRate", matchRate);
+
+            // Get amount totals
+            Double totalAmount = transactionService.getTotalVerifiedAmount();
+            Double todayAmount = transactionService.getTotalVerifiedAmountToday();
+
+            summary.put("totalAmount", totalAmount != null ? totalAmount : 0.0);
+            summary.put("todayAmount", todayAmount != null ? todayAmount : 0.0);
+
+            // Get pending fees from all students
+            double totalPendingFees = transactionService.getTotalPendingFees();
+            summary.put("totalPendingFees", totalPendingFees);
+
+            // Get recent activity (last 7 days)
+            LocalDate weekAgo = LocalDate.now().minusDays(7);
+            long recentCount = transactionService.getBankTransactionCountSince(weekAgo);
+            summary.put("recentTransactionCount", recentCount);
+
+            // Calculate recent amounts by status
+            Map<String, Double> recentAmountsByStatus = transactionService.getRecentAmountsByStatus(weekAgo, LocalDate.now());
+            summary.put("recentAmountsByStatus", recentAmountsByStatus);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Transaction summary retrieved successfully");
+            response.put("data", summary);
+            response.put("timestamp", LocalDateTime.now().toString());
+            response.put("processingTime", System.currentTimeMillis() - startTime);
+
+            log.info("✅ Transaction summary generated in {}ms", System.currentTimeMillis() - startTime);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            log.error("❌ Error generating transaction summary", e);
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to generate transaction summary: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    // ========== SMS ENDPOINTS ==========
 
     @PostMapping("/sms/send")
     public ResponseEntity<Map<String, Object>> sendPaymentSms(
@@ -404,7 +631,7 @@ public class TransactionController {
         }
     }
 
-    // Export Endpoints
+    // ========== EXPORT ENDPOINTS ==========
 
     @GetMapping("/export/csv")
     public ResponseEntity<byte[]> exportTransactionsToCsv(
@@ -485,6 +712,50 @@ public class TransactionController {
             Map<String, Object> errorResponse = new HashMap<>();
             errorResponse.put("success", false);
             errorResponse.put("message", "Failed to generate receipt: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    // ========== NEW HELPER ENDPOINTS ==========
+
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, Object>> healthCheck() {
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        response.put("service", "Transaction Service");
+        response.put("status", "UP");
+        response.put("timestamp", LocalDateTime.now().toString());
+        response.put("version", "1.0.0");
+
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/counts")
+    public ResponseEntity<Map<String, Object>> getTransactionCounts() {
+        try {
+            Map<String, Object> counts = new HashMap<>();
+
+            counts.put("totalBankTransactions", transactionService.getTotalBankTransactionCount());
+            counts.put("unverifiedCount", transactionService.getBankTransactionCountByStatus(TransactionStatus.UNVERIFIED));
+            counts.put("pendingCount", transactionService.getBankTransactionCountByStatus(TransactionStatus.PENDING));
+            counts.put("matchedCount", transactionService.getBankTransactionCountByStatus(TransactionStatus.MATCHED));
+            counts.put("verifiedCount", transactionService.getPaymentTransactionCountVerified());
+            counts.put("cancelledCount", transactionService.getBankTransactionCountByStatus(TransactionStatus.CANCELLED));
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Transaction counts retrieved successfully");
+            response.put("data", counts);
+            response.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to retrieve transaction counts: " + e.getMessage());
             errorResponse.put("timestamp", LocalDateTime.now().toString());
 
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);

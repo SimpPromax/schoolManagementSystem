@@ -7,13 +7,20 @@ import com.system.SchoolManagementSystem.auth.entity.User;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
-import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "bank_transactions")
+@Table(
+        name = "bank_transactions",
+        indexes = {
+                @Index(name = "idx_bank_transaction_status_date", columnList = "status, transaction_date"), // Combined index
+                @Index(name = "idx_bank_transaction_student_status", columnList = "student_id, status"),
+                @Index(name = "idx_bank_transaction_import_batch", columnList = "import_batch_id"),
+                @Index(name = "idx_bank_transaction_bank_ref", columnList = "bank_reference", unique = true)
+        }
+)
 @Data
 @Builder
 @NoArgsConstructor
@@ -29,7 +36,7 @@ public class BankTransaction {
     @Column(name = "bank_reference", nullable = false, unique = true, length = 50)
     private String bankReference;
 
-    @Column(nullable = false)
+    @Column(name = "transaction_date", nullable = false)
     private LocalDate transactionDate;
 
     @Column(nullable = false, length = 500)
@@ -46,7 +53,7 @@ public class BankTransaction {
     private TransactionStatus status = TransactionStatus.UNVERIFIED;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "payment_method")
+    @Column(name = "payment_method", nullable = false)
     private PaymentMethod paymentMethod;
 
     @ManyToOne(fetch = FetchType.LAZY)
@@ -70,10 +77,26 @@ public class BankTransaction {
     @Column(name = "import_batch_id")
     private String importBatchId;
 
+    @Column(name = "sms_sent", nullable = false)
+    private Boolean smsSent = false;
+
+    @Column(name = "sms_sent_at")
+    private LocalDateTime smsSentAt;
+
+    @Column(name = "sms_id")
+    private String smsId;
+
+    // ========== NEW: Link to PaymentTransaction ==========
+    @OneToOne(mappedBy = "bankTransaction", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    private PaymentTransaction paymentTransaction;
+
     @PrePersist
     protected void onCreate() {
         if (paymentMethod == null) {
             paymentMethod = PaymentMethod.BANK_TRANSFER;
+        }
+        if (smsSent == null) {
+            smsSent = false;
         }
     }
 }

@@ -1,4 +1,4 @@
-package com.system.SchoolManagementSystem.util;
+package com.system.SchoolManagementSystem.student.util;
 
 import org.springframework.web.multipart.MultipartFile;
 

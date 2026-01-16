@@ -40,4 +40,21 @@ public interface BankTransactionRepository extends JpaRepository<BankTransaction
             "bt.bankReference LIKE CONCAT('%', :search, '%') OR " +
             "(bt.student IS NOT NULL AND LOWER(bt.student.fullName) LIKE LOWER(CONCAT('%', :search, '%'))))")
     Page<BankTransaction> searchTransactions(@Param("search") String search, Pageable pageable);
+
+
+    // New methods for statistics
+    @Query("SELECT COUNT(bt) FROM BankTransaction bt WHERE bt.status = :status AND bt.transactionDate >= :startDate")
+    Long countByStatusAndDateAfter(@Param("status") TransactionStatus status,
+                                   @Param("startDate") LocalDate startDate);
+
+    @Query("SELECT SUM(bt.amount) FROM BankTransaction bt WHERE bt.status = :status")
+    Double sumAmountByStatus(@Param("status") TransactionStatus status);
+
+    @Query("SELECT COUNT(bt) FROM BankTransaction bt WHERE bt.transactionDate BETWEEN :startDate AND :endDate")
+    Long countByDateRange(@Param("startDate") LocalDate startDate,
+                          @Param("endDate") LocalDate endDate);
+
+    @Query("SELECT bt.status, COUNT(bt) FROM BankTransaction bt WHERE bt.transactionDate BETWEEN :startDate AND :endDate GROUP BY bt.status")
+    List<Object[]> countByStatusAndDateRange(@Param("startDate") LocalDate startDate,
+                                             @Param("endDate") LocalDate endDate);
 }

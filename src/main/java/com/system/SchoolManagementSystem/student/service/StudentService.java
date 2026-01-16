@@ -5,7 +5,7 @@ import com.system.SchoolManagementSystem.student.entity.*;
 import com.system.SchoolManagementSystem.student.repository.*;
 import com.system.SchoolManagementSystem.transaction.entity.PaymentTransaction;
 import com.system.SchoolManagementSystem.transaction.repository.PaymentTransactionRepository;
-import com.system.SchoolManagementSystem.util.FileValidator;
+import com.system.SchoolManagementSystem.student.util.FileValidator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.Resource;

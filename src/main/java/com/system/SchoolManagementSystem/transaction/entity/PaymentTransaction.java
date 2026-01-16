@@ -50,8 +50,9 @@ public class PaymentTransaction {
     @Column(nullable = false)
     private LocalDateTime paymentDate;
 
+    // ========== UPDATED: Bank transaction is now REQUIRED ==========
     @OneToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "bank_transaction_id")
+    @JoinColumn(name = "bank_transaction_id", nullable = false)
     private BankTransaction bankTransaction;
 
     @Column(name = "bank_reference", length = 50)
@@ -111,6 +112,10 @@ public class PaymentTransaction {
     protected void onCreate() {
         if (receiptNumber == null) {
             receiptNumber = "RC-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        }
+        // Automatically set bank reference from bank transaction
+        if (bankTransaction != null && bankReference == null) {
+            bankReference = bankTransaction.getBankReference();
         }
         calculateTotal();
     }

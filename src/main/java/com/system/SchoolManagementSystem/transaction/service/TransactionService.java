@@ -10,18 +10,25 @@ import com.system.SchoolManagementSystem.transaction.repository.*;
 import com.system.SchoolManagementSystem.transaction.util.*;
 import com.system.SchoolManagementSystem.auth.entity.User;
 import com.system.SchoolManagementSystem.auth.repository.UserRepository;
+import lombok.Getter;
 import lombok.RequiredArgsConstructor;
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
+import jakarta.annotation.PostConstruct;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 @Service
@@ -30,7 +37,7 @@ import java.util.stream.Collectors;
 @Slf4j
 public class TransactionService {
 
-    // Repositories
+    // ========== REPOSITORIES ==========
     private final BankTransactionRepository bankTransactionRepository;
     private final PaymentTransactionRepository paymentTransactionRepository;
     private final StudentFeeAssignmentRepository feeAssignmentRepository;
@@ -39,18 +46,47 @@ public class TransactionService {
     private final StudentRepository studentRepository;
     private final UserRepository userRepository;
 
-    // Utilities
+    // ========== UTILITIES ==========
     private final ReceiptGenerator receiptGenerator;
-    private final TransactionMatcher transactionMatcher;
     private final BankStatementParser bankStatementParser;
 
-    // New Fee Update Service
+    // ========== NEW OPTIMIZATION COMPONENTS ==========
+    private final TransactionMatcher transactionMatcher;
+    private final StudentCacheService studentCacheService;
+    private final ImportProgressTracker importProgressTracker;
     private final StudentFeeUpdateService studentFeeUpdateService;
+    private final PaymentTransactionService paymentTransactionService;
 
-    // ========== Bank Transaction Operations ==========
+    // ========== PERFORMANCE MONITORING ==========
+    private final Map<String, ImportProgress> importProgressMap = new ConcurrentHashMap<>();
 
+    // ========== INITIALIZATION ==========
+
+    @PostConstruct
+    public void initialize() {
+        log.info("Initializing TransactionService with optimization components...");
+
+        // Initialize transaction matcher cache asynchronously
+        CompletableFuture.runAsync(() -> {
+            try {
+                log.info("Loading students for transaction matcher cache...");
+                List<Student> allStudents = studentRepository.findAll();
+                transactionMatcher.initializeCache(allStudents);
+                log.info("✅ Transaction matcher cache initialized with {} students", allStudents.size());
+            } catch (Exception e) {
+                log.error("Failed to initialize transaction matcher cache", e);
+            }
+        });
+    }
+
+    // ========== BANK TRANSACTION OPERATIONS ==========
+
+    /**
+     * Original synchronous import (optimized)
+     */
     public List<BankTransactionResponse> importBankTransactions(BankTransactionImportRequest request) {
-        log.info("📥 Importing bank transactions from file: {}", request.getFile().getOriginalFilename());
+        log.info("📥 Importing bank transactions synchronously: {}",
+                request.getFile().getOriginalFilename());
 
         List<BankTransaction> transactions;
         String fileType = request.getFile().getContentType();
@@ -64,23 +100,18 @@ public class TransactionService {
                 throw new IllegalArgumentException("Unsupported file type: " + fileType);
             }
 
-            // Get all students for auto-matching
-            List<Student> allStudents = studentRepository.findAll();
-            log.info("Loaded {} students for auto-matching", allStudents.size());
+            // Use optimized auto-matching with cache
+            List<BankTransaction> matchedTransactions = autoMatchTransactionsOptimized(transactions);
 
-            // Auto-match transactions to students
-            List<BankTransaction> matchedTransactions = autoMatchTransactions(transactions, allStudents);
-
-            // Save transactions
-            List<BankTransaction> savedTransactions = bankTransactionRepository.saveAll(matchedTransactions);
+            // Save transactions in batches for performance
+            List<BankTransaction> savedTransactions = saveTransactionsInBatches(matchedTransactions);
 
             long autoMatchedCount = savedTransactions.stream()
                     .filter(bt -> bt.getStudent() != null)
                     .count();
 
-            log.info("✅ Successfully imported {} transactions, {} auto-matched",
-                    savedTransactions.size(),
-                    autoMatchedCount);
+            log.info("✅ Synchronous import completed: {} transactions, {} auto-matched",
+                    savedTransactions.size(), autoMatchedCount);
 
             // Convert to response DTOs
             return savedTransactions.stream()
@@ -93,107 +124,267 @@ public class TransactionService {
         }
     }
 
-    private List<BankTransaction> autoMatchTransactions(List<BankTransaction> transactions, List<Student> students) {
-        List<BankTransaction> matchedTransactions = new ArrayList<>();
-
-        log.info("🤖 Starting auto-matching for {} transactions with {} students",
-                transactions.size(), students.size());
-
-        for (BankTransaction transaction : transactions) {
-            try {
-                Double transactionAmount = transaction.getAmount();
-                log.debug("Processing transaction: {} (₹{})",
-                        transaction.getDescription(), transactionAmount);
-
-                Optional<Student> matchedStudent = transactionMatcher.findMatchingStudent(transaction, students);
-
-                if (matchedStudent.isPresent()) {
-                    Student student = matchedStudent.get();
-
-                    // Calculate match score with pending amount
-                    Double pendingAmount = getStudentPendingAmount(student);
-
-                    Double matchScore = transactionMatcher.calculateMatchScore(
-                            transaction, student, pendingAmount);
-
-                    log.info("🎯 Match found - Transaction: '{}' (₹{}) → Student: '{}' (Pending: ₹{}) → Score: {}",
-                            transaction.getDescription(),
-                            transactionAmount,
-                            student.getFullName(),
-                            pendingAmount != null ? pendingAmount : 0,
-                            matchScore);
-
-                    // Auto-match if score is high enough
-                    if (matchScore > 50.0) {
-                        transaction.setStudent(student);
-                        transaction.setStatus(TransactionStatus.MATCHED);
-                        transaction.setMatchedAt(LocalDateTime.now());
-
-                        // ✅ USE THE DEDICATED SERVICE TO UPDATE STUDENT FEES
-                        try {
-                            studentFeeUpdateService.updateFeeFromBankTransaction(student, transaction);
-                            log.info("💰 Student fees updated: {} +₹{}",
-                                    student.getFullName(), transactionAmount);
-                        } catch (Exception feeError) {
-                            log.error("⚠️ Failed to update student fees: {}", feeError.getMessage());
-                            // Don't fail the whole transaction if fee update fails
-                        }
-
-                        log.info("✅ AUTO-MATCHED: '{}' (₹{}) to '{}' with score {}",
-                                transaction.getDescription(),
-                                transactionAmount,
-                                student.getFullName(),
-                                matchScore);
-                    } else {
-                        log.info("⚠️ Score too low ({}): Transaction '{}' (₹{}) not auto-matched to '{}'",
-                                matchScore,
-                                transaction.getDescription(),
-                                transactionAmount,
-                                student.getFullName());
-                    }
-                } else {
-                    log.debug("🔍 No student match found for transaction: '{}'",
-                            transaction.getDescription());
-                }
-
-                matchedTransactions.add(transaction);
-
-            } catch (Exception e) {
-                log.error("❌ Error processing transaction {}: {}",
-                        transaction.getBankReference(), e.getMessage(), e);
-                matchedTransactions.add(transaction);
-            }
+    /**
+     * FIXED: OPTIMIZED Auto-matching using cache properly - O(n) complexity
+     */
+    /**
+     * FIXED: Auto-matching with proper cache usage
+     */
+    private List<BankTransaction> autoMatchTransactionsOptimized(List<BankTransaction> transactions) {
+        if (transactions == null || transactions.isEmpty()) {
+            log.info("No transactions to match");
+            return Collections.emptyList();
         }
 
-        // Summary log
-        long autoMatchedCount = matchedTransactions.stream()
-                .filter(bt -> bt.getStudent() != null)
-                .count();
+        log.info("🚀 Starting OPTIMIZED auto-matching for {} transactions", transactions.size());
+        long startTime = System.currentTimeMillis();
 
-        log.info("📊 Auto-matching complete: {}/{} transactions matched ({:.1f}%)",
-                autoMatchedCount, transactions.size(),
-                (autoMatchedCount * 100.0 / transactions.size()));
+        // ========== Load students ONCE for cache initialization ==========
+        List<Student> allStudents = null;
+
+        if (!transactionMatcher.isCacheLoaded()) {
+            log.info("Cache not loaded, loading {} students...");
+            allStudents = studentRepository.findAll();
+            transactionMatcher.initializeCache(allStudents);
+            log.info("✅ Cache initialized with {} students", allStudents.size());
+        } else {
+            log.info("✅ Using pre-loaded cache");
+        }
+
+        List<BankTransaction> matchedTransactions = new ArrayList<>(transactions.size());
+        AtomicInteger autoMatchedCount = new AtomicInteger(0);
+
+        // ========== CRITICAL: Pass EMPTY list to force cache usage ==========
+        for (BankTransaction transaction : transactions) {
+            // Pass empty list - matcher will use cache (O(1) operations)
+            Optional<Student> matchedStudent = transactionMatcher.findMatchingStudent(
+                    transaction, Collections.emptyList());
+
+            if (matchedStudent.isPresent()) {
+                Student student = matchedStudent.get();
+                String description = transaction.getDescription().toLowerCase();
+                String studentName = student.getFullName().toLowerCase();
+
+                // Validate: description must contain student name
+                if (description.contains(studentName)) {
+                    transaction.setStudent(student);
+                    transaction.setStatus(TransactionStatus.MATCHED);
+                    transaction.setMatchedAt(LocalDateTime.now());
+
+                    autoMatchedCount.incrementAndGet();
+
+                    log.debug("✅ Auto-matched via cache: '{}' → '{}'",
+                            transaction.getDescription(), student.getFullName());
+                } else {
+                    log.warn("⚠️ Cache returned invalid match: '{}' doesn't contain '{}'",
+                            description, studentName);
+                }
+            }
+
+            matchedTransactions.add(transaction);
+        }
+
+        long duration = System.currentTimeMillis() - startTime;
+        double rate = transactions.size() / (duration / 1000.0);
+
+        log.info("📊 Auto-matching completed in {}ms: {}/{} matched ({:.1f} txn/sec)",
+                duration, autoMatchedCount.get(), transactions.size(), rate);
 
         return matchedTransactions;
     }
 
-    public Page<BankTransactionResponse> getBankTransactions(TransactionStatus status, String search, Pageable pageable) {
-        Page<BankTransaction> transactions;
+    /**
+     * Helper method to ensure cache is loaded
+     */
+    private void ensureCacheLoaded() {
+        if (!transactionMatcher.isCacheLoaded()) {
+            log.warn("Transaction matcher cache not loaded, loading now...");
+            List<Student> allStudents = studentRepository.findAll();
+            transactionMatcher.initializeCache(allStudents);
+            log.info("✅ Cache loaded with {} students", allStudents.size());
+        }
+    }
 
-        if (status != null && search != null && !search.trim().isEmpty()) {
-            // Filter by both status and search
-            transactions = bankTransactionRepository.findByStatus(status, pageable);
-            // Further filter by search in memory
-            return transactions.map(this::convertToBankTransactionResponse);
-        } else if (status != null) {
-            transactions = bankTransactionRepository.findByStatus(status, pageable);
-        } else if (search != null && !search.trim().isEmpty()) {
-            transactions = bankTransactionRepository.searchTransactions(search, pageable);
-        } else {
-            transactions = bankTransactionRepository.findAll(pageable);
+    /**
+     * Save transactions in batches for performance - UPDATED (Creates payment transactions after saving)
+     */
+    private List<BankTransaction> saveTransactionsInBatches(List<BankTransaction> transactions) {
+        if (transactions.isEmpty()) {
+            return Collections.emptyList();
         }
 
-        return transactions.map(this::convertToBankTransactionResponse);
+        List<BankTransaction> savedTransactions = new ArrayList<>();
+        int batchSize = 1000;
+        int totalBatches = (transactions.size() + batchSize - 1) / batchSize;
+
+        for (int i = 0; i < transactions.size(); i += batchSize) {
+            int end = Math.min(i + batchSize, transactions.size());
+            List<BankTransaction> batch = transactions.subList(i, end);
+
+            try {
+                // Save bank transactions first
+                List<BankTransaction> savedBatch = bankTransactionRepository.saveAll(batch);
+                savedTransactions.addAll(savedBatch);
+
+                // Now create payment transactions for matched ones
+                int paymentCreatedCount = 0;
+                for (BankTransaction savedTransaction : savedBatch) {
+                    if (savedTransaction.getStudent() != null &&
+                            savedTransaction.getStatus() == TransactionStatus.MATCHED &&
+                            savedTransaction.getPaymentTransaction() == null) {
+
+                        try {
+                            PaymentTransaction paymentTransaction =
+                                    paymentTransactionService.createFromMatchedBankTransaction(savedTransaction);
+
+                            // Update student fees
+                            studentFeeUpdateService.updateFeeFromPaymentTransaction(
+                                    savedTransaction.getStudent(),
+                                    paymentTransaction
+                            );
+
+                            // Send SMS
+                            sendAutoMatchSms(
+                                    savedTransaction.getStudent(),
+                                    savedTransaction,
+                                    paymentTransaction
+                            );
+
+                            paymentCreatedCount++;
+
+                            log.trace("Created payment {} for bank transaction {}",
+                                    paymentTransaction.getReceiptNumber(),
+                                    savedTransaction.getBankReference());
+
+                        } catch (Exception e) {
+                            log.warn("Failed to create payment for transaction {}: {}",
+                                    savedTransaction.getBankReference(), e.getMessage());
+                        }
+                    }
+                }
+
+                if (i % (batchSize * 5) == 0) {
+                    log.debug("Saved batch {}/{}: {} transactions, {} payment transactions created",
+                            (i / batchSize) + 1, totalBatches, savedBatch.size(), paymentCreatedCount);
+                }
+
+            } catch (Exception e) {
+                log.error("Failed to save batch {}-{}: {}", i, end, e.getMessage());
+            }
+        }
+
+        log.info("✅ Saved {} transactions and created payment transactions for matched ones", savedTransactions.size());
+        return savedTransactions;
+    }
+
+    // ========== UPDATED AUTO-MATCH SMS METHOD ==========
+
+    @Async
+    private void sendAutoMatchSms(Student student, BankTransaction transaction, PaymentTransaction paymentTransaction) {
+        try {
+            log.info("📱 Attempting to send auto-match SMS for payment: {}",
+                    paymentTransaction.getReceiptNumber());
+
+            // Get recipient phone
+            String recipientPhone = getBestContactPhone(student);
+            if (recipientPhone == null || recipientPhone.trim().isEmpty()) {
+                log.warn("📵 No valid phone number available for student {} to send auto-match SMS",
+                        student.getFullName());
+                return;
+            }
+
+            // Clean and validate phone number
+            recipientPhone = cleanPhoneNumber(recipientPhone);
+            if (!isValidIndianPhoneNumber(recipientPhone)) {
+                log.warn("📵 Invalid phone number format for student {}: {}", student.getFullName(), recipientPhone);
+                return;
+            }
+
+            // Create SMS message for auto-matched transaction WITH RECEIPT NUMBER
+            String message = String.format(
+                    "Dear Parent/Guardian,\n" +
+                            "Payment of ₹%.2f has been auto-matched to %s (Class: %s).\n" +
+                            "Receipt: %s | Bank Ref: %s\n" +
+                            "Transaction Date: %s\n" +
+                            "Thank you! - School Management System",
+                    transaction.getAmount(),
+                    student.getFullName(),
+                    student.getGrade(),
+                    paymentTransaction.getReceiptNumber(),
+                    transaction.getBankReference(),
+                    transaction.getTransactionDate().format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"))
+            );
+
+            // Create SMS log
+            SmsLog smsLog = SmsLog.builder()
+                    .student(student)
+                    .paymentTransaction(paymentTransaction) // Link to payment transaction
+                    .recipientPhone(recipientPhone)
+                    .message(message)
+                    .status(SmsLog.SmsStatus.SENT)
+                    .gatewayMessageId("AUTO-" + UUID.randomUUID().toString().substring(0, 8))
+                    .gatewayResponse("Auto-match SMS sent successfully")
+                    .sentAt(LocalDateTime.now())
+                    .build();
+
+            SmsLog savedSmsLog = smsLogRepository.save(smsLog);
+
+            // Update bank transaction with SMS info
+            transaction.setSmsSent(true);
+            transaction.setSmsSentAt(LocalDateTime.now());
+            transaction.setSmsId(savedSmsLog.getGatewayMessageId());
+            bankTransactionRepository.save(transaction);
+
+            // Update payment transaction with SMS info
+            paymentTransaction.setSmsSent(true);
+            paymentTransaction.setSmsSentAt(LocalDateTime.now());
+            paymentTransaction.setSmsId(savedSmsLog.getGatewayMessageId());
+            paymentTransactionRepository.save(paymentTransaction);
+
+            log.info("✅ Auto-match SMS sent to {} for student {} (Receipt: {})",
+                    recipientPhone, student.getFullName(), paymentTransaction.getReceiptNumber());
+
+        } catch (Exception e) {
+            log.warn("⚠️ Failed to send auto-match SMS for transaction {}: {}",
+                    transaction.getBankReference(), e.getMessage());
+        }
+    }
+
+    // ========== EXISTING METHODS (UPDATED FOR PAYMENT TRANSACTION CREATION) ==========
+
+    public Page<BankTransactionResponse> getBankTransactions(TransactionStatus status, String search, Pageable pageable) {
+        try {
+            Page<BankTransaction> transactions;
+
+            if (status != null && search != null && !search.trim().isEmpty()) {
+                // Use repository search method if available
+                transactions = bankTransactionRepository.searchTransactions(search, pageable);
+                // Filter by status in memory for small result sets
+                List<BankTransaction> filtered = transactions.getContent().stream()
+                        .filter(t -> t.getStatus() == status)
+                        .collect(Collectors.toList());
+
+                return new PageImpl<>(filtered.stream()
+                        .map(this::convertToBankTransactionResponse)
+                        .collect(Collectors.toList()),
+                        pageable,
+                        filtered.size());
+
+            } else if (status != null) {
+                transactions = bankTransactionRepository.findByStatus(status, pageable);
+            } else if (search != null && !search.trim().isEmpty()) {
+                transactions = bankTransactionRepository.searchTransactions(search, pageable);
+            } else {
+                transactions = bankTransactionRepository.findAll(pageable);
+            }
+
+            return transactions.map(this::convertToBankTransactionResponse);
+
+        } catch (Exception e) {
+            log.error("❌ Error getting bank transactions", e);
+            // Return empty page instead of throwing
+            return Page.empty(pageable);
+        }
     }
 
     public BankTransactionResponse getBankTransactionById(Long id) {
@@ -214,29 +405,43 @@ public class TransactionService {
         transaction.setStatus(TransactionStatus.MATCHED);
         transaction.setMatchedAt(LocalDateTime.now());
 
-        // ✅ USE THE DEDICATED SERVICE TO UPDATE STUDENT FEES
+        // ========== UPDATED: Create payment transaction (bank transaction already saved) ==========
         try {
-            studentFeeUpdateService.updateFeeFromBankTransaction(student, transaction);
-            log.info("💰 Student fees updated via manual match: {} +₹{}",
-                    student.getFullName(), transaction.getAmount());
+            PaymentTransaction paymentTransaction =
+                    paymentTransactionService.createFromMatchedBankTransaction(transaction);
+
+            // Update student fees
+            studentFeeUpdateService.updateFeeFromPaymentTransaction(student, paymentTransaction);
+            log.info("💰 Student fees updated via manual match: {} +₹{} (Receipt: {})",
+                    student.getFullName(), transaction.getAmount(),
+                    paymentTransaction.getReceiptNumber());
+
         } catch (Exception feeError) {
-            log.error("⚠️ Failed to update student fees during manual match: {}", feeError.getMessage());
-            // Continue anyway - the match is still valid
+            log.error("⚠️ Failed to create payment during manual match: {}", feeError.getMessage());
+            // Revert
+            transaction.setStudent(null);
+            transaction.setStatus(TransactionStatus.UNVERIFIED);
+            transaction.setPaymentTransaction(null);
+            throw new RuntimeException("Failed to create payment transaction: " + feeError.getMessage());
         }
 
         BankTransaction savedTransaction = bankTransactionRepository.save(transaction);
+
+        // Send auto-match SMS for manual matches too
+        if (savedTransaction.getPaymentTransaction() != null) {
+            sendAutoMatchSms(student, savedTransaction, savedTransaction.getPaymentTransaction());
+        }
+
         log.info("✅ Manually matched transaction {} to student {}", transactionId, student.getFullName());
         return convertToBankTransactionResponse(savedTransaction);
     }
 
     public void deleteBankTransaction(Long id) {
-        if (!bankTransactionRepository.existsById(id)) {
-            throw new RuntimeException("Transaction not found with id: " + id);
-        }
-
-        // First get the transaction to check if it has a student
         BankTransaction transaction = bankTransactionRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Transaction not found"));
+
+        // Check if payment transaction exists
+        PaymentTransaction paymentTransaction = transaction.getPaymentTransaction();
 
         // If transaction was matched to a student, revert the fee payment
         if (transaction.getStudent() != null && transaction.getAmount() != null) {
@@ -254,11 +459,18 @@ public class TransactionService {
             }
         }
 
-        bankTransactionRepository.deleteById(id);
+        // Delete payment transaction first (if exists)
+        if (paymentTransaction != null) {
+            paymentTransactionRepository.delete(paymentTransaction);
+            log.info("🗑️ Deleted linked payment transaction: {}", paymentTransaction.getReceiptNumber());
+        }
+
+        // Delete bank transaction
+        bankTransactionRepository.delete(transaction);
         log.info("🗑️ Deleted bank transaction with id: {}", id);
     }
 
-    // ========== Payment Transaction Operations ==========
+    // ========== PAYMENT TRANSACTION OPERATIONS ==========
 
     public PaymentTransactionResponse verifyPayment(PaymentVerificationRequest request) {
         log.info("🔐 Verifying payment for bank transaction: {}", request.getBankTransactionId());
@@ -271,71 +483,78 @@ public class TransactionService {
         Student student = studentRepository.findById(request.getStudentId())
                 .orElseThrow(() -> new RuntimeException("Student not found"));
 
-        // Create payment transaction
-        PaymentTransaction paymentTransaction = PaymentTransaction.builder()
-                .student(student)
-                .amount(request.getAmount())
-                .paymentMethod(request.getPaymentMethod())
-                .paymentDate(LocalDateTime.now())
-                .bankTransaction(bankTransaction)
-                .bankReference(bankTransaction.getBankReference())
-                .isVerified(true)
-                .verifiedAt(LocalDateTime.now())
-                .smsSent(false)
-                .smsSentAt(null)
-                .smsId(null)
-                .paymentFor(request.getPaymentFor())
-                .discountApplied(request.getDiscountApplied())
-                .lateFeePaid(request.getLateFeePaid())
-                .convenienceFee(request.getConvenienceFee())
-                .notes(request.getNotes())
-                .build();
+        // ========== UPDATED: Use bank transaction ID method ==========
+        PaymentTransaction paymentTransaction =
+                paymentTransactionService.getOrCreateForBankTransactionId(request.getBankTransactionId());
 
-        // Update bank transaction status
-        bankTransaction.setStatus(TransactionStatus.VERIFIED);
-        bankTransactionRepository.save(bankTransaction);
+        // If payment wasn't verified before, update it with verification details
+        if (!paymentTransaction.getIsVerified()) {
+            paymentTransaction.setAmount(request.getAmount());
+            paymentTransaction.setPaymentMethod(request.getPaymentMethod());
+            paymentTransaction.setPaymentDate(LocalDateTime.now());
+            paymentTransaction.setPaymentFor(request.getPaymentFor());
+            paymentTransaction.setDiscountApplied(request.getDiscountApplied());
+            paymentTransaction.setLateFeePaid(request.getLateFeePaid());
+            paymentTransaction.setConvenienceFee(request.getConvenienceFee());
+            paymentTransaction.setNotes(request.getNotes());
+            paymentTransaction.setIsVerified(true);
+            paymentTransaction.setVerifiedAt(LocalDateTime.now());
 
-        // ✅ USE THE DEDICATED SERVICE TO UPDATE STUDENT FEES
-        try {
-            studentFeeUpdateService.updateFeeFromPaymentTransaction(student, paymentTransaction);
-            log.info("💰 Student fees updated via payment verification: {} +₹{}",
-                    student.getFullName(), request.getAmount());
-        } catch (Exception feeError) {
-            log.error("⚠️ Failed to update student fees during payment verification: {}", feeError.getMessage());
-            // Continue - payment verification is still valid
+            // Update bank transaction
+            bankTransaction.setStudent(student);
+            bankTransaction.setStatus(TransactionStatus.VERIFIED);
+            bankTransactionRepository.save(bankTransaction);
+
+            paymentTransactionRepository.save(paymentTransaction);
         }
 
-        // Save payment transaction
-        PaymentTransaction savedTransaction = paymentTransactionRepository.save(paymentTransaction);
+        // Verify the payment transaction
+        PaymentTransaction verifiedTransaction =
+                paymentTransactionService.verifyPaymentTransaction(paymentTransaction.getId());
+
+        // Update student fees
+        try {
+            studentFeeUpdateService.updateFeeFromPaymentTransaction(student, verifiedTransaction);
+            log.info("💰 Student fees updated via payment verification: {} +₹{} (Receipt: {})",
+                    student.getFullName(), request.getAmount(),
+                    verifiedTransaction.getReceiptNumber());
+        } catch (Exception feeError) {
+            log.error("⚠️ Failed to update student fees during verification: {}", feeError.getMessage());
+        }
+
         log.info("✅ Payment verified: Receipt {} for student {} - ₹{}",
-                savedTransaction.getReceiptNumber(),
+                verifiedTransaction.getReceiptNumber(),
                 student.getFullName(),
-                savedTransaction.getAmount());
+                verifiedTransaction.getAmount());
 
         // Send SMS if requested
         if (request.getSendSms() != null && request.getSendSms()) {
-            try {
-                SmsRequest smsRequest = new SmsRequest();
-                smsRequest.setStudentId(student.getId());
-                smsRequest.setPaymentTransactionId(savedTransaction.getId());
-                smsRequest.setMessage("Payment of ₹" + request.getAmount() + " received. Receipt: " + savedTransaction.getReceiptNumber());
-
-                // Get student phone or emergency contact phone
-                String recipientPhone = getBestContactPhone(student);
-                if (recipientPhone != null && !recipientPhone.trim().isEmpty()) {
-                    smsRequest.setRecipientPhone(recipientPhone);
-                    sendPaymentSms(smsRequest);
-                    log.info("📱 SMS sent for payment {}", savedTransaction.getReceiptNumber());
-                } else {
-                    log.warn("📵 No phone number available for student {} to send SMS", student.getFullName());
-                }
-            } catch (Exception e) {
-                log.warn("⚠️ Failed to send SMS for payment {}: {}", savedTransaction.getId(), e.getMessage());
-                // Don't fail the whole transaction if SMS fails
-            }
+            sendPaymentSmsAsync(student, verifiedTransaction, request.getAmount());
         }
 
-        return convertToPaymentTransactionResponse(savedTransaction);
+        return convertToPaymentTransactionResponse(verifiedTransaction);
+    }
+
+    @Async
+    protected void sendPaymentSmsAsync(Student student, PaymentTransaction transaction, Double amount) {
+        try {
+            SmsRequest smsRequest = new SmsRequest();
+            smsRequest.setStudentId(student.getId());
+            smsRequest.setPaymentTransactionId(transaction.getId());
+            smsRequest.setMessage("Payment of ₹" + amount + " received. Receipt: " + transaction.getReceiptNumber());
+
+            // Get student phone or emergency contact phone
+            String recipientPhone = getBestContactPhone(student);
+            if (recipientPhone != null && !recipientPhone.trim().isEmpty()) {
+                smsRequest.setRecipientPhone(recipientPhone);
+                sendPaymentSms(smsRequest);
+                log.info("📱 SMS sent for payment {}", transaction.getReceiptNumber());
+            } else {
+                log.warn("📵 No phone number available for student {} to send SMS", student.getFullName());
+            }
+        } catch (Exception e) {
+            log.warn("⚠️ Failed to send SMS for payment {}: {}", transaction.getId(), e.getMessage());
+        }
     }
 
     public List<PaymentTransactionResponse> bulkVerifyPayments(BulkVerificationRequest request) {
@@ -354,6 +573,10 @@ public class TransactionService {
                     continue;
                 }
 
+                // ========== UPDATED: Use bank transaction ID method ==========
+                PaymentTransaction paymentTransaction =
+                        paymentTransactionService.getOrCreateForBankTransactionId(bankTransactionId);
+
                 // Create payment verification request
                 PaymentVerificationRequest singleRequest = new PaymentVerificationRequest();
                 singleRequest.setBankTransactionId(bankTransactionId);
@@ -362,14 +585,16 @@ public class TransactionService {
                 singleRequest.setPaymentMethod(bankTransaction.getPaymentMethod());
                 singleRequest.setSendSms(request.getSendSms());
                 singleRequest.setNotes(request.getNotes());
+                singleRequest.setPaymentFor("SCHOOL_FEE");
 
                 // Verify the payment
                 PaymentTransactionResponse verifiedPayment = verifyPayment(singleRequest);
                 responses.add(verifiedPayment);
 
-                log.info("✅ Bulk verified transaction {} for student {}",
+                log.info("✅ Bulk verified transaction {} for student {} (Receipt: {})",
                         bankTransactionId,
-                        bankTransaction.getStudent().getFullName());
+                        bankTransaction.getStudent().getFullName(),
+                        paymentTransaction.getReceiptNumber());
 
             } catch (Exception e) {
                 log.error("❌ Failed to verify payment for transaction {}: {}", bankTransactionId, e.getMessage());
@@ -428,87 +653,60 @@ public class TransactionService {
                 .collect(Collectors.toList());
     }
 
-    // ========== Statistics Operations ==========
+    // ========== STATISTICS OPERATIONS ==========
 
     public TransactionStatisticsResponse getTransactionStatistics() {
         TransactionStatisticsResponse statistics = new TransactionStatisticsResponse();
 
         try {
-            // Get ALL bank transactions
-            List<BankTransaction> allBankTransactions = bankTransactionRepository.findAll();
-
-            // Manual counts for accuracy
-            long totalBank = allBankTransactions.size();
-            long unverifiedCount = 0;
-            long matchedCount = 0;
-            long bankVerifiedCount = 0;
-
-            for (BankTransaction tx : allBankTransactions) {
-                if (tx.getStatus() == TransactionStatus.UNVERIFIED) {
-                    unverifiedCount++;
-                } else if (tx.getStatus() == TransactionStatus.MATCHED) {
-                    matchedCount++;
-                } else if (tx.getStatus() == TransactionStatus.VERIFIED) {
-                    bankVerifiedCount++;
-                }
-            }
-
-            // Get verified payment transactions count
-            List<PaymentTransaction> allPaymentTransactions = paymentTransactionRepository.findAll();
-            long paymentVerifiedCount = allPaymentTransactions.stream()
-                    .filter(PaymentTransaction::getIsVerified)
-                    .count();
+            // Get counts using repository methods (optimized)
+            long totalBank = bankTransactionRepository.count();
+            long unverifiedCount = bankTransactionRepository.countByStatus(TransactionStatus.UNVERIFIED);
+            long matchedCount = bankTransactionRepository.countByStatus(TransactionStatus.MATCHED);
+            long verifiedCount = paymentTransactionRepository.countByIsVerified(true);
 
             // Set counts
             statistics.setUnverifiedCount(unverifiedCount);
             statistics.setMatchedCount(matchedCount);
-            statistics.setVerifiedCount(paymentVerifiedCount);
+            statistics.setVerifiedCount(verifiedCount);
 
             // Calculate match rate
             if (totalBank > 0) {
                 double matchRate = (matchedCount * 100.0) / totalBank;
                 statistics.setMatchRate(String.format("%.1f%%", matchRate));
-
                 log.info("📈 MATCH RATE: {}/{} = {}%", matchedCount, totalBank, matchRate);
             } else {
                 statistics.setMatchRate("0%");
             }
 
             // Calculate total verified amount from payment transactions
-            double totalAmount = allPaymentTransactions.stream()
-                    .filter(PaymentTransaction::getIsVerified)
-                    .mapToDouble(PaymentTransaction::getAmount)
-                    .sum();
-            statistics.setTotalAmount(totalAmount);
+            Double totalAmount = paymentTransactionRepository.getTotalVerifiedAmount();
+            statistics.setTotalAmount(totalAmount != null ? totalAmount : 0.0);
 
             // Calculate today's verified amount
-            double todayAmount = allPaymentTransactions.stream()
-                    .filter(PaymentTransaction::getIsVerified)
-                    .filter(pt -> pt.getPaymentDate() != null)
-                    .filter(pt -> pt.getPaymentDate().toLocalDate().equals(LocalDate.now()))
-                    .mapToDouble(PaymentTransaction::getAmount)
-                    .sum();
-            statistics.setTodayAmount(todayAmount);
+            Double todayAmount = paymentTransactionRepository.getTotalVerifiedAmountToday();
+            statistics.setTodayAmount(todayAmount != null ? todayAmount : 0.0);
 
             // Get pending and overdue payments from students
-            List<Student> allStudents = studentRepository.findAll();
+            List<Student> studentsWithPending = studentRepository.findAll().stream()
+                    .filter(s -> s.getFeeStatus() == Student.FeeStatus.PENDING ||
+                            s.getFeeStatus() == Student.FeeStatus.OVERDUE)
+                    .collect(Collectors.toList());
 
-            long pendingPayments = allStudents.stream()
+            long pendingPayments = studentsWithPending.stream()
                     .filter(s -> s.getFeeStatus() == Student.FeeStatus.PENDING)
                     .count();
 
-            long overduePayments = allStudents.stream()
+            long overduePayments = studentsWithPending.stream()
                     .filter(s -> s.getFeeStatus() == Student.FeeStatus.OVERDUE)
                     .count();
 
             statistics.setPendingPayments(pendingPayments);
             statistics.setOverduePayments(overduePayments);
 
-            // Calculate total pending amount using our new service
-            double totalPendingAmount = allStudents.stream()
-                    .map(studentFeeUpdateService::getFeeBreakdown)
-                    .filter(Objects::nonNull)
-                    .mapToDouble(StudentFeeUpdateService.FeeBreakdown::getPendingAmount)
+            // Calculate total pending amount
+            double totalPendingAmount = studentsWithPending.stream()
+                    .mapToDouble(s -> s.getPendingAmount() != null ? s.getPendingAmount() : 0.0)
                     .sum();
             statistics.setTotalPendingAmount(totalPendingAmount);
 
@@ -526,51 +724,56 @@ public class TransactionService {
     public TransactionStatisticsResponse getStatisticsByDateRange(LocalDate startDate, LocalDate endDate) {
         TransactionStatisticsResponse statistics = new TransactionStatisticsResponse();
 
-        // Count unverified bank transactions in date range
-        List<BankTransaction> unverifiedTransactions = bankTransactionRepository
-                .findByTransactionDateBetween(startDate, endDate)
-                .stream()
-                .filter(t -> t.getStatus() == TransactionStatus.UNVERIFIED)
-                .collect(Collectors.toList());
-        statistics.setUnverifiedCount((long) unverifiedTransactions.size());
+        try {
+            // Count unverified bank transactions in date range
+            List<BankTransaction> unverifiedTransactions = bankTransactionRepository
+                    .findByTransactionDateBetween(startDate, endDate)
+                    .stream()
+                    .filter(t -> t.getStatus() == TransactionStatus.UNVERIFIED)
+                    .collect(Collectors.toList());
+            statistics.setUnverifiedCount((long) unverifiedTransactions.size());
 
-        // Count verified payments in date range
-        List<PaymentTransaction> verifiedPayments = paymentTransactionRepository
-                .findByPaymentDateBetween(startDate.atStartOfDay(), endDate.plusDays(1).atStartOfDay())
-                .stream()
-                .filter(PaymentTransaction::getIsVerified)
-                .collect(Collectors.toList());
-        statistics.setVerifiedCount((long) verifiedPayments.size());
+            // Count verified payments in date range
+            List<PaymentTransaction> verifiedPayments = paymentTransactionRepository
+                    .findByPaymentDateBetween(startDate.atStartOfDay(), endDate.plusDays(1).atStartOfDay())
+                    .stream()
+                    .filter(PaymentTransaction::getIsVerified)
+                    .collect(Collectors.toList());
+            statistics.setVerifiedCount((long) verifiedPayments.size());
 
-        // Calculate total amount in date range
-        Double totalAmount = verifiedPayments.stream()
-                .mapToDouble(PaymentTransaction::getAmount)
-                .sum();
-        statistics.setTotalAmount(totalAmount);
+            // Calculate total amount in date range
+            Double totalAmount = verifiedPayments.stream()
+                    .mapToDouble(PaymentTransaction::getAmount)
+                    .sum();
+            statistics.setTotalAmount(totalAmount);
 
-        // Calculate today's amount (if today is within range)
-        if (LocalDate.now().isAfter(startDate.minusDays(1)) && LocalDate.now().isBefore(endDate.plusDays(1))) {
-            Double todayAmount = paymentTransactionRepository.getTotalVerifiedAmountToday();
-            statistics.setTodayAmount(todayAmount != null ? todayAmount : 0.0);
-        } else {
-            statistics.setTodayAmount(0.0);
-        }
+            // Calculate today's amount (if today is within range)
+            if (LocalDate.now().isAfter(startDate.minusDays(1)) && LocalDate.now().isBefore(endDate.plusDays(1))) {
+                Double todayAmount = paymentTransactionRepository.getTotalVerifiedAmountToday();
+                statistics.setTodayAmount(todayAmount != null ? todayAmount : 0.0);
+            } else {
+                statistics.setTodayAmount(0.0);
+            }
 
-        // Calculate match rate
-        long totalProcessed = statistics.getVerifiedCount();
-        long totalTransactions = statistics.getUnverifiedCount() + totalProcessed;
+            // Calculate match rate
+            long totalProcessed = statistics.getVerifiedCount();
+            long totalTransactions = statistics.getUnverifiedCount() + totalProcessed;
 
-        if (totalTransactions > 0) {
-            double matchRate = (totalProcessed * 100.0) / totalTransactions;
-            statistics.setMatchRate(String.format("%.1f%%", matchRate));
-        } else {
-            statistics.setMatchRate("0%");
+            if (totalTransactions > 0) {
+                double matchRate = (totalProcessed * 100.0) / totalTransactions;
+                statistics.setMatchRate(String.format("%.1f%%", matchRate));
+            } else {
+                statistics.setMatchRate("0%");
+            }
+
+        } catch (Exception e) {
+            log.error("❌ Error calculating date range statistics", e);
         }
 
         return statistics;
     }
 
-    // ========== SMS Operations ==========
+    // ========== SMS OPERATIONS ==========
 
     public SmsLogResponse sendPaymentSms(SmsRequest request) {
         log.info("📱 Sending SMS for payment transaction: {}", request.getPaymentTransactionId());
@@ -671,49 +874,56 @@ public class TransactionService {
                 .collect(Collectors.toList());
     }
 
-    // ========== Export Operations ==========
+    // ========== EXPORT OPERATIONS ==========
 
     public byte[] exportTransactionsToCsv(String type, LocalDate startDate, LocalDate endDate) {
         StringBuilder csvContent = new StringBuilder();
 
         if ("verified".equalsIgnoreCase(type)) {
-            csvContent.append("Receipt Number,Payment Date,Amount,Student Name,Grade,Payment Method,Bank Reference\n");
+            csvContent.append("Receipt Number,Payment Date,Amount,Student Name,Grade,Payment Method,Bank Reference,Bank Transaction ID\n");
 
             List<PaymentTransaction> transactions = paymentTransactionRepository
                     .findByPaymentDateBetween(startDate.atStartOfDay(), endDate.plusDays(1).atStartOfDay())
                     .stream()
                     .filter(PaymentTransaction::getIsVerified)
+                    .limit(100000) // Limit for performance
                     .collect(Collectors.toList());
 
             for (PaymentTransaction transaction : transactions) {
-                csvContent.append(String.format("\"%s\",%s,%.2f,\"%s\",\"%s\",\"%s\",\"%s\"\n",
+                csvContent.append(String.format("\"%s\",%s,%.2f,\"%s\",\"%s\",\"%s\",\"%s\",%s\n",
                         transaction.getReceiptNumber(),
                         transaction.getPaymentDate().toLocalDate(),
                         transaction.getAmount(),
                         transaction.getStudent().getFullName(),
                         transaction.getStudent().getGrade(),
                         transaction.getPaymentMethod(),
-                        transaction.getBankReference() != null ? transaction.getBankReference() : ""
+                        transaction.getBankReference() != null ? transaction.getBankReference() : "",
+                        transaction.getBankTransaction() != null ? transaction.getBankTransaction().getId() : ""
                 ));
             }
 
             log.info("📤 Exported {} verified transactions to CSV", transactions.size());
 
         } else if ("bank".equalsIgnoreCase(type)) {
-            csvContent.append("Bank Reference,Transaction Date,Description,Amount,Status,Student Name,Bank Account\n");
+            csvContent.append("Bank Reference,Transaction Date,Description,Amount,Status,Student Name,Bank Account,Payment Transaction ID,Receipt Number\n");
 
             List<BankTransaction> transactions = bankTransactionRepository
-                    .findByTransactionDateBetween(startDate, endDate);
+                    .findByTransactionDateBetween(startDate, endDate)
+                    .stream()
+                    .limit(100000) // Limit for performance
+                    .collect(Collectors.toList());
 
             for (BankTransaction transaction : transactions) {
-                csvContent.append(String.format("\"%s\",%s,\"%s\",%.2f,\"%s\",\"%s\",\"%s\"\n",
+                csvContent.append(String.format("\"%s\",%s,\"%s\",%.2f,\"%s\",\"%s\",\"%s\",%s,\"%s\"\n",
                         transaction.getBankReference(),
                         transaction.getTransactionDate(),
                         transaction.getDescription(),
                         transaction.getAmount(),
                         transaction.getStatus(),
                         transaction.getStudent() != null ? transaction.getStudent().getFullName() : "",
-                        transaction.getBankAccount() != null ? transaction.getBankAccount() : ""
+                        transaction.getBankAccount() != null ? transaction.getBankAccount() : "",
+                        transaction.getPaymentTransaction() != null ? transaction.getPaymentTransaction().getId() : "",
+                        transaction.getPaymentTransaction() != null ? transaction.getPaymentTransaction().getReceiptNumber() : ""
                 ));
             }
 
@@ -756,8 +966,19 @@ public class TransactionService {
                     throw new RuntimeException("Matched bank transaction must have a student assigned");
                 }
 
+                // Check if payment transaction exists
+                if (bankTransaction.getPaymentTransaction() == null) {
+                    log.warn("⚠️ No payment transaction found for matched bank transaction, creating one...");
+                    // Create payment transaction automatically
+                    PaymentTransaction paymentTransaction =
+                            paymentTransactionService.createFromMatchedBankTransaction(bankTransaction);
+                    log.info("📄 Created payment transaction {} for receipt generation",
+                            paymentTransaction.getReceiptNumber());
+                    return receiptGenerator.generateReceiptPdf(paymentTransaction);
+                }
+
                 log.info("📄 Generating receipt for auto-matched bank transaction");
-                return receiptGenerator.generateReceiptPdf(bankTransaction);
+                return receiptGenerator.generateReceiptPdf(bankTransaction.getPaymentTransaction());
             } else {
                 throw new RuntimeException("Bank transaction must be MATCHED or VERIFIED to generate receipt");
             }
@@ -768,54 +989,61 @@ public class TransactionService {
         throw new RuntimeException("Transaction not found with id: " + transactionId);
     }
 
-    // ========== Helper Methods ==========
+    // ========== IMPORT PROGRESS TRACKING ==========
 
-    private Double getStudentPendingAmount(Student student) {
-        if (student == null) {
-            log.debug("Student is null, returning null");
-            return null;
-        }
-
-        try {
-            // Use the new fee update service to get pending amount
-            StudentFeeUpdateService.FeeBreakdown breakdown = studentFeeUpdateService.getFeeBreakdown(student);
-
-            if (breakdown != null) {
-                Double pendingAmount = breakdown.getPendingAmount();
-
-                // ✅ CRITICAL FIX: Return 0.0 if student has no pending, not null
-                // This allows amount matching to work (even if amount is 0)
-                if (pendingAmount != null) {
-                    log.debug("Found pending amount: ₹{} for student: {}",
-                            pendingAmount, student.getFullName());
-                    return pendingAmount;
-                } else {
-                    log.debug("Student {} has null pending amount, returning 0.0", student.getFullName());
-                    return 0.0;
-                }
-            }
-
-            log.debug("No fee breakdown for student: {}, returning 0.0", student.getFullName());
-            return 0.0; // Return 0 instead of null
-
-        } catch (Exception e) {
-            log.error("Error getting pending amount for student {}: {}",
-                    student.getFullName(), e.getMessage());
-            return 0.0; // Return 0 instead of null
-        }
+    public ImportProgress getImportProgress(String importId) {
+        return importProgressMap.get(importId);
     }
+
+    public boolean cancelImport(String importId) {
+        ImportProgress progress = importProgressMap.get(importId);
+        if (progress != null && progress.getStatus() == ImportStatus.PROCESSING) {
+            progress.setStatus(ImportStatus.CANCELLED);
+            log.info("Import {} cancelled by user", importId);
+            return true;
+        }
+        return false;
+    }
+
+    // ========== OPTIMIZATION ENDPOINTS ==========
+
+    public StudentCacheService.CacheStats getCacheStats() {
+        return StudentCacheService.CacheStats.fromService(studentCacheService);
+    }
+
+    public void refreshMatcherCache() {
+        CompletableFuture.runAsync(() -> {
+            try {
+                log.info("Refreshing transaction matcher cache...");
+                List<Student> allStudents = studentRepository.findAll();
+                transactionMatcher.refreshCache(allStudents);
+                log.info("✅ Transaction matcher cache refreshed with {} students", allStudents.size());
+            } catch (Exception e) {
+                log.error("Failed to refresh transaction matcher cache", e);
+            }
+        });
+    }
+
+    // ========== HELPER METHODS ==========
 
     private String getBestContactPhone(Student student) {
         if (student == null) return null;
 
         // Try student's own phone first
         if (student.getPhone() != null && !student.getPhone().trim().isEmpty()) {
-            return student.getPhone().trim();
+            String phone = student.getPhone().trim();
+            if (isValidIndianPhoneNumber(phone)) {
+                return phone;
+            }
         }
 
         // Try emergency contact phone
-        if (student.getEmergencyContactPhone() != null && !student.getEmergencyContactPhone().trim().isEmpty()) {
-            return student.getEmergencyContactPhone().trim();
+        if (student.getEmergencyContactPhone() != null &&
+                !student.getEmergencyContactPhone().trim().isEmpty()) {
+            String phone = student.getEmergencyContactPhone().trim();
+            if (isValidIndianPhoneNumber(phone)) {
+                return phone;
+            }
         }
 
         return null;
@@ -860,7 +1088,7 @@ public class TransactionService {
         return false;
     }
 
-    // ========== Conversion Methods ==========
+    // ========== CONVERSION METHODS ==========
 
     private BankTransactionResponse convertToBankTransactionResponse(BankTransaction transaction) {
         BankTransactionResponse response = new BankTransactionResponse();
@@ -877,32 +1105,37 @@ public class TransactionService {
         response.setFileName(transaction.getFileName());
         response.setImportBatchId(transaction.getImportBatchId());
 
+        // SMS fields
+        response.setSmsSent(transaction.getSmsSent());
+        response.setSmsSentAt(transaction.getSmsSentAt());
+        response.setSmsId(transaction.getSmsId());
+
+        // ========== NEW: ADD PAYMENT TRANSACTION INFO ==========
+        if (transaction.getPaymentTransaction() != null) {
+            PaymentTransaction pt = transaction.getPaymentTransaction();
+            response.setPaymentTransactionId(pt.getId());
+            response.setReceiptNumber(pt.getReceiptNumber());
+            response.setPaymentVerified(pt.getIsVerified());
+            response.setPaymentVerifiedAt(pt.getVerifiedAt());
+        }
+
         if (transaction.getStudent() != null) {
             Student student = transaction.getStudent();
             response.setStudentId(student.getId());
             response.setStudentName(student.getFullName());
             response.setStudentGrade(student.getGrade());
 
-            // ✅ Now these methods exist in your updated DTO
-            try {
-                StudentFeeUpdateService.FeeBreakdown breakdown =
-                        studentFeeUpdateService.getFeeBreakdown(student);
-                if (breakdown != null) {
-                    // Set fee information
-                    response.setStudentPendingAmount(breakdown.getPendingAmount());
-                    response.setStudentFeeStatus(student.getFeeStatus());
-                    response.setStudentTotalFee(breakdown.getTotalFee());
-                    response.setStudentPaidAmount(breakdown.getPaidAmount());
-                    if (breakdown.getPaymentPercentage() != null) {
-                        response.setStudentPaymentPercentage(breakdown.getPaymentPercentage());
-                    }
+            // Set fee information
+            response.setStudentPendingAmount(student.getPendingAmount());
+            response.setStudentFeeStatus(student.getFeeStatus());
+            response.setStudentTotalFee(student.getTotalFee());
+            response.setStudentPaidAmount(student.getPaidAmount());
 
-                    log.debug("✅ Added fee info to transaction response: {} - Pending: ₹{}",
-                            student.getFullName(), breakdown.getPendingAmount());
-                }
-            } catch (Exception e) {
-                log.warn("⚠️ Could not fetch fee breakdown for student {}: {}",
-                        student.getId(), e.getMessage());
+            if (student.getPendingAmount() != null && student.getTotalFee() != null &&
+                    student.getTotalFee() > 0) {
+                double percentage = (student.getPaidAmount() != null ? student.getPaidAmount() : 0.0) /
+                        student.getTotalFee() * 100;
+                response.setStudentPaymentPercentage(percentage);
             }
         }
 
@@ -934,26 +1167,17 @@ public class TransactionService {
             response.setStudentName(student.getFullName());
             response.setStudentGrade(student.getGrade());
 
-            // ✅ Now these methods exist in your updated DTO
-            try {
-                StudentFeeUpdateService.FeeBreakdown breakdown =
-                        studentFeeUpdateService.getFeeBreakdown(student);
-                if (breakdown != null) {
-                    // Set fee information
-                    response.setStudentPendingAmount(breakdown.getPendingAmount());
-                    response.setStudentFeeStatus(student.getFeeStatus());
-                    response.setStudentTotalFee(breakdown.getTotalFee());
-                    response.setStudentPaidAmount(breakdown.getPaidAmount());
-                    if (breakdown.getPaymentPercentage() != null) {
-                        response.setStudentPaymentPercentage(breakdown.getPaymentPercentage());
-                    }
+            // Set fee information
+            response.setStudentPendingAmount(student.getPendingAmount());
+            response.setStudentFeeStatus(student.getFeeStatus());
+            response.setStudentTotalFee(student.getTotalFee());
+            response.setStudentPaidAmount(student.getPaidAmount());
 
-                    log.debug("✅ Added fee info to payment response: {} - Pending: ₹{}",
-                            student.getFullName(), breakdown.getPendingAmount());
-                }
-            } catch (Exception e) {
-                log.warn("⚠️ Could not fetch fee breakdown for student {}: {}",
-                        student.getId(), e.getMessage());
+            if (student.getPendingAmount() != null && student.getTotalFee() != null &&
+                    student.getTotalFee() > 0) {
+                double percentage = (student.getPaidAmount() != null ? student.getPaidAmount() : 0.0) /
+                        student.getTotalFee() * 100;
+                response.setStudentPaymentPercentage(percentage);
             }
         }
 
@@ -987,5 +1211,270 @@ public class TransactionService {
         }
 
         return response;
+    }
+
+    // ========== INNER CLASSES ==========
+
+    public static class ImportProgress {
+        // Getters and setters
+        @Getter
+        private final String importId;
+        @Getter
+        private final String fileName;
+        @Getter
+        private final long fileSize;
+        @Getter
+        private ImportStatus status;
+        @Setter
+        @Getter
+        private int totalLines;
+        @Setter
+        @Getter
+        private int processedLines;
+        @Getter
+        @Setter
+        private int savedLines;
+        @Getter
+        private int failedLines;
+        @Getter
+        private int matchedCount;
+        @Getter
+        private String currentStatus;
+        @Getter
+        @Setter
+        private String error;
+        private long startTime;
+        private long endTime;
+        @Getter
+        @Setter
+        private int currentBatch;
+        @Getter
+        @Setter
+        private int totalBatches;
+
+        public ImportProgress(String importId, String fileName, long fileSize) {
+            this.importId = importId;
+            this.fileName = fileName;
+            this.fileSize = fileSize;
+            this.startTime = System.currentTimeMillis();
+            this.status = ImportStatus.QUEUED;
+            this.currentStatus = "Queued for processing";
+        }
+
+        public double getProgressPercentage() {
+            if (totalLines == 0) return 0;
+            return (processedLines * 100.0) / totalLines;
+        }
+
+        public long getElapsedTime() {
+            if (endTime > 0) {
+                return endTime - startTime;
+            }
+            return System.currentTimeMillis() - startTime;
+        }
+
+        public void incrementFailedLines(int count) {
+            this.failedLines += count;
+        }
+
+        public void updateStatus(String status) {
+            this.currentStatus = status;
+        }
+
+        public void setStatus(ImportStatus status) {
+            this.status = status;
+            if (status == ImportStatus.COMPLETED || status == ImportStatus.FAILED) {
+                this.endTime = System.currentTimeMillis();
+            }
+        }
+
+        public void setMatchedCount(int matchedCount) { this.matchedCount = matchedCount; }
+    }
+
+    public enum ImportStatus {
+        QUEUED, PROCESSING, COMPLETED, FAILED, CANCELLED
+    }
+    // ========== NEW METHODS FOR CONTROLLER ==========
+
+    public List<BankTransactionResponse> getAllBankTransactions(
+            TransactionStatus status, String search, LocalDate fromDate, LocalDate toDate) {
+
+        List<BankTransaction> transactions;
+
+        if (status != null && search != null && !search.trim().isEmpty()) {
+            // Combined filter: status + search
+            Page<BankTransaction> searchResult = bankTransactionRepository.searchTransactions(
+                    search, Pageable.unpaged());
+            transactions = searchResult.getContent().stream()
+                    .filter(t -> t.getStatus() == status)
+                    .collect(Collectors.toList());
+
+        } else if (status != null) {
+            // Filter by status only
+            transactions = bankTransactionRepository.findByStatus(status);
+
+        } else if (search != null && !search.trim().isEmpty()) {
+            // Search only
+            Page<BankTransaction> searchResult = bankTransactionRepository.searchTransactions(
+                    search, Pageable.unpaged());
+            transactions = searchResult.getContent();
+
+        } else {
+            // Get all transactions
+            transactions = bankTransactionRepository.findAll();
+        }
+
+        // Apply date filters if provided
+        if (fromDate != null) {
+            transactions = transactions.stream()
+                    .filter(t -> !t.getTransactionDate().isBefore(fromDate))
+                    .collect(Collectors.toList());
+        }
+
+        if (toDate != null) {
+            transactions = transactions.stream()
+                    .filter(t -> !t.getTransactionDate().isAfter(toDate))
+                    .collect(Collectors.toList());
+        }
+
+        // Sort by date, most recent first
+        transactions.sort((a, b) -> b.getTransactionDate().compareTo(a.getTransactionDate()));
+
+        return transactions.stream()
+                .map(this::convertToBankTransactionResponse)
+                .collect(Collectors.toList());
+    }
+
+    public Page<BankTransactionResponse> getBankTransactions(
+            TransactionStatus status, String search, LocalDate fromDate, LocalDate toDate, Pageable pageable) {
+
+        Page<BankTransaction> transactions;
+
+        if (status != null && search != null && !search.trim().isEmpty()) {
+            // Combined filter with pagination
+            Page<BankTransaction> searchResult = bankTransactionRepository.searchTransactions(search, pageable);
+            List<BankTransaction> filtered = searchResult.getContent().stream()
+                    .filter(t -> t.getStatus() == status)
+                    .collect(Collectors.toList());
+
+            transactions = new PageImpl<>(filtered, pageable, filtered.size());
+
+        } else if (status != null) {
+            // Filter by status with pagination
+            transactions = bankTransactionRepository.findByStatus(status, pageable);
+
+        } else if (search != null && !search.trim().isEmpty()) {
+            // Search with pagination
+            transactions = bankTransactionRepository.searchTransactions(search, pageable);
+
+        } else {
+            // Get all with pagination
+            transactions = bankTransactionRepository.findAll(pageable);
+        }
+
+        // Apply date filters if provided
+        if (fromDate != null || toDate != null) {
+            List<BankTransaction> filtered = transactions.getContent().stream()
+                    .filter(t -> {
+                        if (fromDate != null && t.getTransactionDate().isBefore(fromDate)) {
+                            return false;
+                        }
+                        if (toDate != null && t.getTransactionDate().isAfter(toDate)) {
+                            return false;
+                        }
+                        return true;
+                    })
+                    .collect(Collectors.toList());
+
+            transactions = new PageImpl<>(filtered, pageable, filtered.size());
+        }
+
+        return transactions.map(this::convertToBankTransactionResponse);
+    }
+
+    public List<PaymentTransactionResponse> getAllVerifiedTransactions(String search) {
+        List<PaymentTransaction> transactions;
+
+        if (search != null && !search.trim().isEmpty()) {
+            Page<PaymentTransaction> searchResult = paymentTransactionRepository.searchTransactions(
+                    search, Pageable.unpaged());
+            transactions = searchResult.getContent().stream()
+                    .filter(PaymentTransaction::getIsVerified)
+                    .collect(Collectors.toList());
+        } else {
+            // Get all verified transactions
+            transactions = paymentTransactionRepository.findByIsVerified(true);
+        }
+
+        // Sort by payment date, most recent first
+        transactions.sort((a, b) -> b.getPaymentDate().compareTo(a.getPaymentDate()));
+
+        return transactions.stream()
+                .map(this::convertToPaymentTransactionResponse)
+                .collect(Collectors.toList());
+    }
+
+    // Statistics helper methods
+    public long getTotalBankTransactionCount() {
+        return bankTransactionRepository.count();
+    }
+
+    public long getBankTransactionCountByStatus(TransactionStatus status) {
+        Long count = bankTransactionRepository.countByStatus(status);
+        return count != null ? count : 0L;
+    }
+
+    public long getPaymentTransactionCountVerified() {
+        Long count = paymentTransactionRepository.countByIsVerified(true);
+        return count != null ? count : 0L;
+    }
+
+    public long getBankTransactionCountSince(LocalDate sinceDate) {
+        List<BankTransaction> recent = bankTransactionRepository
+                .findByTransactionDateBetween(sinceDate, LocalDate.now());
+        return recent.size();
+    }
+
+    public Map<String, Double> getRecentAmountsByStatus(LocalDate startDate, LocalDate endDate) {
+        List<BankTransaction> recentTransactions = bankTransactionRepository
+                .findByTransactionDateBetween(startDate, endDate);
+
+        return recentTransactions.stream()
+                .collect(Collectors.groupingBy(
+                        t -> t.getStatus().name(),
+                        Collectors.summingDouble(BankTransaction::getAmount)
+                ));
+    }
+
+    public double getTotalPendingFees() {
+        return studentRepository.findAll().stream()
+                .mapToDouble(s -> s.getPendingAmount() != null ? s.getPendingAmount() : 0.0)
+                .sum();
+    }
+
+    /**
+     * Get total amount of all verified payments
+     */
+    public Double getTotalVerifiedAmount() {
+        try {
+            Double amount = paymentTransactionRepository.getTotalVerifiedAmount();
+            return amount != null ? amount : 0.0;
+        } catch (Exception e) {
+            log.error("Error getting total verified amount", e);
+            return 0.0;
+        }
+    }
+
+    /**
+     * Get total amount of verified payments made today
+     */
+    public Double getTotalVerifiedAmountToday() {
+        try {
+            Double amount = paymentTransactionRepository.getTotalVerifiedAmountToday();
+            return amount != null ? amount : 0.0;
+        } catch (Exception e) {
+            log.error("Error getting today's verified amount", e);
+            return 0.0;
+        }
     }
 }

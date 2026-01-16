@@ -51,4 +51,16 @@ public interface PaymentTransactionRepository extends JpaRepository<PaymentTrans
     Page<PaymentTransaction> searchTransactions(@Param("search") String search, Pageable pageable);
 
     Long countByIsVerified(Boolean isVerified);
+
+    // ========== NEW: Find by bank transaction ==========
+    @Query("SELECT pt FROM PaymentTransaction pt WHERE pt.bankTransaction.id = :bankTransactionId")
+    Optional<PaymentTransaction> findByBankTransactionId(@Param("bankTransactionId") Long bankTransactionId);
+
+    // Find all payment transactions with bank transaction details
+    @Query("SELECT pt FROM PaymentTransaction pt JOIN FETCH pt.bankTransaction bt WHERE bt IS NOT NULL")
+    List<PaymentTransaction> findAllWithBankTransactions();
+
+    // Count payment transactions created from bank transactions
+    @Query("SELECT COUNT(pt) FROM PaymentTransaction pt WHERE pt.bankTransaction IS NOT NULL")
+    Long countCreatedFromBankTransactions();
 }
