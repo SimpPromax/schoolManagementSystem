@@ -17,7 +17,7 @@ import java.util.Set;
 @EqualsAndHashCode(onlyExplicitlyIncluded = true)
 @ToString(exclude = {"familyMembers", "medicalRecords", "achievements", "interests"})
 public class Student {
-
+// leon uutatumia rentity graphs ukishaverify the repository sql statements for faster querries
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     @EqualsAndHashCode.Include
@@ -158,6 +158,10 @@ public class Student {
 
     @Column(name = "other_fees")
     private Double otherFees;
+
+    // Add this field to your Student entity
+    @Column(name = "fee_due_date")
+    private LocalDate feeDueDate;
     // ===========================================
 
     // Status

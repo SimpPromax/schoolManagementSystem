@@ -2,15 +2,17 @@ package com.system.SchoolManagementSystem.student.repository;
 
 import com.system.SchoolManagementSystem.student.entity.Student;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 
 @Repository
-public interface StudentRepository extends JpaRepository<Student, Long> {
+public interface StudentRepository extends JpaRepository<Student, Long>, JpaSpecificationExecutor<Student> {
 
     // Original method - keep for backward compatibility
     Optional<Student> findByStudentId(String studentId);
@@ -54,10 +56,6 @@ public interface StudentRepository extends JpaRepository<Student, Long> {
     @Query("SELECT s FROM Student s WHERE LOWER(s.fullName) LIKE LOWER(CONCAT('%', :name, '%'))")
     List<Student> searchByName(@Param("name") String name);
 
-    // OPTIMIZED: Add pagination to search
-    @Query("SELECT s FROM Student s WHERE LOWER(s.fullName) LIKE LOWER(CONCAT('%', :name, '%'))")
-    List<Student> searchByNameOptimized(@Param("name") String name, org.springframework.data.domain.Pageable pageable);
-
     @Query("SELECT s FROM Student s WHERE s.grade = :grade AND s.academicYear = :academicYear")
     List<Student> findByGradeAndAcademicYear(@Param("grade") String grade,
                                              @Param("academicYear") String academicYear);
@@ -65,25 +63,38 @@ public interface StudentRepository extends JpaRepository<Student, Long> {
     boolean existsByStudentId(String studentId);
     boolean existsByEmail(String email);
 
-    // ========== OPTIMIZED QUERIES FOR TRANSACTION MATCHING ==========
 
-    // Find students with pending amount near a specific amount
-    @Query("SELECT s FROM Student s WHERE " +
-            "s.pendingAmount BETWEEN :minAmount AND :maxAmount " +
-            "ORDER BY ABS(s.pendingAmount - :amount)")
-    List<Student> findByPendingAmountNear(@Param("amount") Double amount,
-                                          @Param("minAmount") Double minAmount,
-                                          @Param("maxAmount") Double maxAmount);
+    // UPDATED: Changed BigDecimal to Double for consistency
+    @Query("SELECT COALESCE(SUM(s.totalFee), 0.0) FROM Student s")
+    Double getTotalFeeSum();
 
-    // Find students with common school amounts
-    @Query("SELECT s FROM Student s WHERE " +
-            "s.pendingAmount IN :amounts OR " +
-            "s.totalFee IN :amounts")
-    List<Student> findByCommonAmounts(@Param("amounts") List<Double> amounts);
+    @Query("SELECT s.feeStatus, COUNT(s) FROM Student s GROUP BY s.feeStatus")
+    List<Object[]> countStudentsByFeeStatus();
 
-    // Find students by name parts for faster matching
-    @Query("SELECT s FROM Student s WHERE " +
-            "LOWER(s.fullName) LIKE LOWER(CONCAT(:namePart, '%')) " +
-            "OR LOWER(s.fullName) LIKE LOWER(CONCAT('% ', :namePart, '%'))")
-    List<Student> findByNamePart(@Param("namePart") String namePart);
+    @Query("SELECT COUNT(s) FROM Student s WHERE s.paidAmount > 0 AND s.paidAmount < s.totalFee")
+    Long countPartialPayments();
+
+    // UPDATED: Changed COALESCE(..., 0) to COALESCE(..., 0.0) for Double return
+    @Query("SELECT CASE " +
+            "WHEN s.pendingAmount <= 1000 THEN '0-1K' " +
+            "WHEN s.pendingAmount <= 5000 THEN '1K-5K' " +
+            "WHEN s.pendingAmount <= 10000 THEN '5K-10K' " +
+            "WHEN s.pendingAmount <= 20000 THEN '10K-20K' " +
+            "ELSE '20K+' " +
+            "END as range, " +
+            "COUNT(s) as count, " +
+            "COALESCE(SUM(s.pendingAmount), 0.0) as amount " +
+            "FROM Student s " +
+            "WHERE s.feeStatus = 'OVERDUE' " +
+            "GROUP BY CASE " +
+            "WHEN s.pendingAmount <= 1000 THEN '0-1K' " +
+            "WHEN s.pendingAmount <= 5000 THEN '1K-5K' " +
+            "WHEN s.pendingAmount <= 10000 THEN '5K-10K' " +
+            "WHEN s.pendingAmount <= 20000 THEN '10K-20K' " +
+            "ELSE '20K+' " +
+            "END")
+    List<Object[]> getOverdueDistribution();
+
+    @Query("SELECT s FROM Student s WHERE s.feeStatus = 'OVERDUE' AND s.feeDueDate <= :date")
+    List<Student> findOverdueStudents(@Param("date") LocalDate date);
 }
