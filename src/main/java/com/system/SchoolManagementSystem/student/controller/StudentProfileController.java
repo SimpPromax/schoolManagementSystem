@@ -3,6 +3,7 @@ package com.system.SchoolManagementSystem.student.controller;
 import com.system.SchoolManagementSystem.student.dto.*;
 import com.system.SchoolManagementSystem.student.entity.*;
 import com.system.SchoolManagementSystem.student.service.StudentService;
+import com.system.SchoolManagementSystem.student.repository.StudentRepository;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -12,6 +13,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
 import java.time.LocalDateTime;
@@ -679,4 +681,78 @@ public class StudentProfileController {
                 Thread.currentThread().getId() + "-" +
                 ((int) (Math.random() * 1000));
     }
+
+    /**
+     * Get all students with fee summaries
+     */
+    @GetMapping("/fee-summary")
+    public ResponseEntity<List<StudentFeeSummaryDTO>> getAllStudentsFeeSummary() {
+        String requestId = generateRequestId();
+        log.info("[CONTROLLER] [GET-ALL-STUDENTS-FEE-SUMMARY] [{}] Started", requestId);
+
+        List<StudentFeeSummaryDTO> summaries = studentService.getAllStudentsFeeSummary();
+
+        log.info("[CONTROLLER] [GET-ALL-STUDENTS-FEE-SUMMARY] [{}] Completed - Returning {} fee summaries",
+                requestId, summaries.size());
+        return ResponseEntity.ok(summaries);
+    }
+
+    /**
+     * Get grade-wise fee statistics for dashboard
+     */
+    @GetMapping("/fee-summary/grade-statistics")
+    public ResponseEntity<Map<String, Object>> getGradeWiseFeeStatistics() {
+        String requestId = generateRequestId();
+        log.info("[CONTROLLER] [GET-GRADE-WISE-FEE-STATISTICS] [{}] Started", requestId);
+
+        Map<String, Object> statistics = studentService.getGradeWiseFeeStatistics();
+
+        log.info("[CONTROLLER] [GET-GRADE-WISE-FEE-STATISTICS] [{}] Completed - Statistics for {} grades",
+                requestId, statistics.get("totalGrades"));
+        return ResponseEntity.ok(statistics);
+    }
+
+    /**
+     * Get students fee summary by grade
+     */
+    @GetMapping("/fee-summary/grade/{grade}")
+    public ResponseEntity<List<StudentFeeSummaryDTO>> getStudentsFeeSummaryByGrade(@PathVariable String grade) {
+        String requestId = generateRequestId();
+        log.info("[CONTROLLER] [GET-STUDENTS-FEE-SUMMARY-BY-GRADE] [{}] Started - Grade: {}",
+                requestId, grade);
+
+        List<StudentFeeSummaryDTO> summaries = studentService.getStudentsFeeSummaryByGrade(grade);
+
+        log.info("[CONTROLLER] [GET-STUDENTS-FEE-SUMMARY-BY-GRADE] [{}] Completed - Found {} students in grade {}",
+                requestId, summaries.size(), grade);
+        return ResponseEntity.ok(summaries);
+    }
+
+// ========== GRADE OPERATIONS ==========
+
+    /**
+     * Get all distinct grades from students (for dropdowns)
+     */
+    @GetMapping("/grades")
+    public ResponseEntity<List<String>> getAllGrades() {
+        String requestId = generateRequestId();
+        log.info("[CONTROLLER] [GET-ALL-GRADES] [{}] Started", requestId);
+
+        try {
+            // Call the service method, not repository directly
+            List<String> grades = studentService.getAllGrades();
+
+            // Log the grades found
+            log.info("[CONTROLLER] [GET-ALL-GRADES] [{}] Found {} unique grades: {}",
+                    requestId, grades.size(), grades);
+
+            return ResponseEntity.ok(grades);
+        } catch (Exception e) {
+            log.error("[CONTROLLER] [GET-ALL-GRADES] [{}] ERROR: {}", requestId, e.getMessage(), e);
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Failed to fetch grades: " + e.getMessage(), e);
+        }
+    }
+
+
 }

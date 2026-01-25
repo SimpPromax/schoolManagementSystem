@@ -11,5 +11,6 @@ public enum PaymentMethod {
     NEFT,
     RTGS,
     IMPS,
-    OTHER
+    OTHER,
+    MPESA
 }

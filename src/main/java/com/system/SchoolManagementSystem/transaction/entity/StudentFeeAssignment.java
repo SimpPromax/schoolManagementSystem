@@ -44,13 +44,20 @@ public class StudentFeeAssignment {
     private Double totalAmount;
 
     @Column(name = "paid_amount", nullable = false)
+    @Builder.Default
     private Double paidAmount = 0.0;
 
     @Column(name = "pending_amount", nullable = false)
     private Double pendingAmount;
 
+    // ========== ADD DISCOUNT FIELD ==========
+    @Column(name = "discount_amount")
+    @Builder.Default
+    private Double discountAmount = 0.0;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "fee_status", nullable = false)
+    @Builder.Default
     private FeeStatus feeStatus = FeeStatus.PENDING;
 
     @Column(name = "last_payment_date")
@@ -60,12 +67,14 @@ public class StudentFeeAssignment {
     private LocalDate dueDate;
 
     @Column(name = "reminders_sent")
+    @Builder.Default
     private Integer remindersSent = 0;
 
     @Column(name = "last_reminder_date")
     private LocalDate lastReminderDate;
 
     @Column(name = "is_active", nullable = false)
+    @Builder.Default
     private Boolean isActive = true;
 
     @OneToMany(mappedBy = "feeAssignment", cascade = CascadeType.ALL, orphanRemoval = true)
@@ -83,20 +92,27 @@ public class StudentFeeAssignment {
     @PrePersist
     protected void onCreate() {
         updatePendingAmount();
+        calculateNetAmount();
     }
 
     @PreUpdate
     protected void onUpdate() {
         updatePendingAmount();
         updateFeeStatus();
+        calculateNetAmount();
     }
 
     private void updatePendingAmount() {
-        pendingAmount = totalAmount - paidAmount;
+        pendingAmount = (totalAmount - discountAmount) - paidAmount;
+        if (pendingAmount < 0) {
+            pendingAmount = 0.0;
+        }
     }
 
     private void updateFeeStatus() {
-        if (paidAmount >= totalAmount) {
+        double netAmount = totalAmount - discountAmount;
+
+        if (paidAmount >= netAmount) {
             feeStatus = FeeStatus.PAID;
         } else if (dueDate != null && LocalDate.now().isAfter(dueDate)) {
             feeStatus = FeeStatus.OVERDUE;
@@ -105,5 +121,53 @@ public class StudentFeeAssignment {
         } else {
             feeStatus = FeeStatus.PENDING;
         }
+    }
+
+    private void calculateNetAmount() {
+        // This method ensures discount is applied correctly
+        // Net amount = totalAmount - discountAmount
+    }
+
+    // ========== HELPER METHODS ==========
+
+    /**
+     * Get net amount after discount
+     */
+    public Double getNetAmount() {
+        return totalAmount - discountAmount;
+    }
+
+    /**
+     * Apply discount to the assignment
+     */
+    public void applyDiscount(Double discount) {
+        if (discount == null || discount < 0) {
+            throw new IllegalArgumentException("Discount cannot be negative");
+        }
+        if (discount > totalAmount) {
+            throw new IllegalArgumentException("Discount cannot exceed total amount");
+        }
+        this.discountAmount = discount;
+        updatePendingAmount();
+        updateFeeStatus();
+    }
+
+    /**
+     * Remove discount
+     */
+    public void removeDiscount() {
+        this.discountAmount = 0.0;
+        updatePendingAmount();
+        updateFeeStatus();
+    }
+
+    /**
+     * Get discount percentage
+     */
+    public Double getDiscountPercentage() {
+        if (totalAmount == null || totalAmount == 0) {
+            return 0.0;
+        }
+        return (discountAmount / totalAmount) * 100;
     }
 }

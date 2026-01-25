@@ -39,9 +39,11 @@ public class FeeStructure {
     private Double totalAmount;
 
     @Column(name = "installment_count", nullable = false)
+    @Builder.Default
     private Integer installmentCount = 1;
 
     @Column(name = "is_active", nullable = false)
+    @Builder.Default
     private Boolean isActive = true;
 
     @OneToMany(mappedBy = "feeStructure", cascade = CascadeType.ALL, orphanRemoval = true)

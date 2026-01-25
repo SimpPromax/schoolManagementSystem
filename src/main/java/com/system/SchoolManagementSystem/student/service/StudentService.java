@@ -21,7 +21,10 @@ import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.Period;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Service
@@ -1526,5 +1529,173 @@ public class StudentService {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
                     "Failed to update student from DTO", e);
         }
+    }
+
+    /**
+     * Get all students with fee summaries for dashboard
+     */
+    @Transactional(readOnly = true)
+    public List<StudentFeeSummaryDTO> getAllStudentsFeeSummary() {
+        log.info("[STUDENT-SERVICE] [GET-ALL-STUDENTS-FEE-SUMMARY] Started");
+        try {
+            long startTime = System.currentTimeMillis();
+
+            List<StudentFeeSummaryDTO> summaries = studentRepository.findAllStudentsWithFeeSummary();
+
+            long executionTime = System.currentTimeMillis() - startTime;
+            log.info("[STUDENT-SERVICE] [GET-ALL-STUDENTS-FEE-SUMMARY] Completed in {} ms. Found {} students",
+                    executionTime, summaries.size());
+
+            return summaries;
+        } catch (Exception e) {
+            log.error("[STUDENT-SERVICE] [GET-ALL-STUDENTS-FEE-SUMMARY] ERROR: {}", e.getMessage(), e);
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Failed to fetch students fee summary: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Get grade-wise fee statistics for dashboard
+     */
+    @Transactional(readOnly = true)
+    public Map<String, Object> getGradeWiseFeeStatistics() {
+        log.info("[STUDENT-SERVICE] [GET-GRADE-WISE-FEE-STATISTICS] Started");
+        try {
+            // Get grade statistics from repository
+            List<GradeStatisticsDTO> gradeStats = studentRepository.getGradeWiseStatistics();
+
+            // Calculate overall totals
+            double overallTotalFee = gradeStats.stream()
+                    .mapToDouble(GradeStatisticsDTO::getTotalFee)
+                    .sum();
+            double overallPaidAmount = gradeStats.stream()
+                    .mapToDouble(GradeStatisticsDTO::getPaidAmount)
+                    .sum();
+            double overallPendingAmount = gradeStats.stream()
+                    .mapToDouble(GradeStatisticsDTO::getPendingAmount)
+                    .sum();
+            double overallCollectionRate = overallTotalFee > 0 ?
+                    (overallPaidAmount / overallTotalFee) * 100 : 0;
+
+            int totalEnrolled = gradeStats.stream()
+                    .mapToInt(GradeStatisticsDTO::getEnrolled)
+                    .sum();
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("grades", gradeStats);
+            result.put("totalGrades", gradeStats.size());
+            result.put("totalEnrolled", totalEnrolled);
+            result.put("overallTotalFee", overallTotalFee);
+            result.put("overallPaidAmount", overallPaidAmount);
+            result.put("overallPendingAmount", overallPendingAmount);
+            result.put("overallCollectionRate", Math.round(overallCollectionRate * 10) / 10.0);
+
+            log.info("[STUDENT-SERVICE] [GET-GRADE-WISE-FEE-STATISTICS] Completed - Found {} grades with {} total students",
+                    gradeStats.size(), totalEnrolled);
+
+            return result;
+        } catch (Exception e) {
+            log.error("[STUDENT-SERVICE] [GET-GRADE-WISE-FEE-STATISTICS] ERROR: {}", e.getMessage(), e);
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Failed to calculate grade-wise fee statistics: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Get students by grade with fee summary
+     */
+    @Transactional(readOnly = true)
+    public List<StudentFeeSummaryDTO> getStudentsFeeSummaryByGrade(String grade) {
+        log.info("[STUDENT-SERVICE] [GET-STUDENTS-FEE-SUMMARY-BY-GRADE] Started - Grade: {}", grade);
+        try {
+            // Get all students and filter by grade
+            List<StudentFeeSummaryDTO> allSummaries = getAllStudentsFeeSummary();
+            List<StudentFeeSummaryDTO> gradeSummaries = allSummaries.stream()
+                    .filter(summary -> summary.getGrade() != null && summary.getGrade().equals(grade))
+                    .collect(Collectors.toList());
+
+            log.info("[STUDENT-SERVICE] [GET-STUDENTS-FEE-SUMMARY-BY-GRADE] Completed - Found {} students in grade {}",
+                    gradeSummaries.size(), grade);
+
+            return gradeSummaries;
+        } catch (Exception e) {
+            log.error("[STUDENT-SERVICE] [GET-STUDENTS-FEE-SUMMARY-BY-GRADE] ERROR for grade {}: {}",
+                    grade, e.getMessage(), e);
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Failed to fetch students fee summary by grade: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Get all distinct grades from active students
+     */
+    @Transactional(readOnly = true)
+    public List<String> getAllGrades() {
+        log.info("[STUDENT-SERVICE] [GET-ALL-GRADES] Started");
+        try {
+            long startTime = System.currentTimeMillis();
+
+            // Call repository method (this is where the query executes)
+            List<String> grades = studentRepository.findDistinctGrades();
+
+            if (grades == null) {
+                grades = new ArrayList<>();
+            }
+
+            // Sort grades numerically if they contain numbers
+            List<String> sortedGrades = grades.stream()
+                    .filter(grade -> grade != null && !grade.trim().isEmpty())
+                    .map(String::trim)
+                    .distinct()
+                    .sorted((a, b) -> {
+                        // Extract numbers from grade strings
+                        Integer numA = extractNumberFromGrade(a);
+                        Integer numB = extractNumberFromGrade(b);
+
+                        // If both have numbers, compare numerically
+                        if (numA != null && numB != null) {
+                            return numA.compareTo(numB);
+                        }
+
+                        // If only one has number, put it first
+                        if (numA != null) return -1;
+                        if (numB != null) return 1;
+
+                        // Otherwise, compare alphabetically
+                        return a.compareToIgnoreCase(b);
+                    })
+                    .collect(Collectors.toList());
+
+            long executionTime = System.currentTimeMillis() - startTime;
+            log.info("[STUDENT-SERVICE] [GET-ALL-GRADES] Completed in {} ms. Found {} grades: {}",
+                    executionTime, sortedGrades.size(), sortedGrades);
+
+            return sortedGrades;
+        } catch (Exception e) {
+            log.error("[STUDENT-SERVICE] [GET-ALL-GRADES] ERROR: {}", e.getMessage(), e);
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Failed to fetch grades: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Helper method to extract number from grade string
+     */
+    private Integer extractNumberFromGrade(String grade) {
+        if (grade == null || grade.isEmpty()) {
+            return null;
+        }
+
+        try {
+            // Try to extract number from various formats
+            String numbers = grade.replaceAll("[^0-9]", "");
+            if (!numbers.isEmpty()) {
+                return Integer.parseInt(numbers);
+            }
+        } catch (NumberFormatException e) {
+            log.debug("Could not extract number from grade: {}", grade);
+        }
+
+        return null;
     }
 }

@@ -48,6 +48,17 @@ public class BankTransaction {
     @Column(name = "bank_account", length = 50)
     private String bankAccount;
 
+    // ========== NEW FIELDS ==========
+    @Column(name = "bank_name", length = 100)
+    private String bankName;
+
+    @Column(name = "bank_branch", length = 100)
+    private String bankBranch;
+
+    @Column(name = "cheque_number", length = 50)
+    private String chequeNumber;
+    // ================================
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private TransactionStatus status = TransactionStatus.UNVERIFIED;
@@ -86,7 +97,6 @@ public class BankTransaction {
     @Column(name = "sms_id")
     private String smsId;
 
-    // ========== NEW: Link to PaymentTransaction ==========
     @OneToOne(mappedBy = "bankTransaction", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private PaymentTransaction paymentTransaction;
 
