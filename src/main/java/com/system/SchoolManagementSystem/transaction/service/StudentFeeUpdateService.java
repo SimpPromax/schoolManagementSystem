@@ -2,10 +2,11 @@ package com.system.SchoolManagementSystem.transaction.service;
 
 import com.system.SchoolManagementSystem.student.entity.Student;
 import com.system.SchoolManagementSystem.student.repository.StudentRepository;
+import com.system.SchoolManagementSystem.termmanagement.dto.request.PaymentApplicationRequest;
+import com.system.SchoolManagementSystem.termmanagement.dto.response.PaymentApplicationResponse;
+import com.system.SchoolManagementSystem.termmanagement.service.TermFeeService;
 import com.system.SchoolManagementSystem.transaction.entity.BankTransaction;
 import com.system.SchoolManagementSystem.transaction.entity.PaymentTransaction;
-import lombok.Builder;
-import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -14,7 +15,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 @RequiredArgsConstructor
@@ -23,296 +25,328 @@ import java.util.stream.Collectors;
 public class StudentFeeUpdateService {
 
     private final StudentRepository studentRepository;
+    private final TermFeeService termFeeService;
+
+    // Concurrency control - one lock per student
+    private final Map<Long, ReentrantLock> studentLocks = new ConcurrentHashMap<>();
+
+    // ========== SINGLE SOURCE OF TRUTH METHODS ==========
 
     /**
-     * Update student fee payment from a bank transaction
+     * MAIN ENTRY POINT - Single source of truth for all fee updates
      */
-    public Student updateFeeFromBankTransaction(Student student, BankTransaction bankTransaction) {
-        if (student == null || bankTransaction == null) {
-            log.warn("Cannot update fee: Student or transaction is null");
-            return student;
-        }
+    @Transactional
+    public PaymentApplicationResponse updateStudentFeeFromPayment(
+            Long studentId,
+            Double amount,
+            String reference,
+            String notes,
+            String source) {
 
-        return updateFeePayment(
-                student,
-                bankTransaction.getAmount(),
-                bankTransaction.getBankReference(),
-                "BANK_TX_" + bankTransaction.getId()
-        );
-    }
-
-    /**
-     * Update student fee payment from a verified payment transaction
-     */
-    public Student updateFeeFromPaymentTransaction(Student student, PaymentTransaction paymentTransaction) {
-        if (student == null || paymentTransaction == null) {
-            log.warn("Cannot update fee: Student or payment transaction is null");
-            return student;
-        }
-
-        return updateFeePayment(
-                student,
-                paymentTransaction.getAmount(),
-                paymentTransaction.getReceiptNumber(),
-                "PAYMENT_" + paymentTransaction.getId()
-        );
-    }
-
-    /**
-     * Core method to update student fee payment
-     */
-    public Student updateFeePayment(Student student, Double paymentAmount, String transactionReference, String source) {
-        if (student == null || paymentAmount == null || paymentAmount <= 0) {
-            log.warn("Invalid payment update request: student={}, amount={}", student, paymentAmount);
-            return student;
-        }
+        // Get or create lock for this student
+        ReentrantLock lock = studentLocks.computeIfAbsent(studentId, k -> new ReentrantLock());
+        lock.lock();
 
         try {
-            // Get current fee information
-            Double currentPaid = student.getPaidAmount() != null ? student.getPaidAmount() : 0.0;
-            Double totalFee = student.getTotalFee() != null ? student.getTotalFee() : 0.0;
+            log.info("🔄 [SINGLE-SOURCE] Updating fee for student {}: ₹{} via {} (Ref: {})",
+                    studentId, amount, source, reference);
 
-            // Update paid amount
-            Double newPaidAmount = currentPaid + paymentAmount;
-            student.setPaidAmount(newPaidAmount);
+            // 1. Validate student can receive payment
+            validateStudentForPayment(studentId);
 
-            // Calculate new pending amount
-            Double pendingAmount = Math.max(0, totalFee - newPaidAmount);
-            student.setPendingAmount(pendingAmount);
+            // 2. First update term fee items (FIFO logic)
+            PaymentApplicationRequest feeRequest = new PaymentApplicationRequest();
+            feeRequest.setStudentId(studentId);
+            feeRequest.setAmount(amount);
+            feeRequest.setReference(reference);
+            feeRequest.setNotes(notes != null ? notes : source);
+            feeRequest.setApplyToFutureTerms(true);
 
-            // Update fee status
-            updateFeeStatus(student, newPaidAmount, totalFee);
+            PaymentApplicationResponse termFeeResponse = termFeeService.applyPaymentToStudent(feeRequest);
 
-            // Update timestamp
-            student.setUpdatedAt(LocalDateTime.now());
+            // 3. Then update student summary (optimized - no full recalculation)
+            updateStudentFeeSummaryOptimized(studentId);
 
-            // Save and log
-            Student savedStudent = studentRepository.save(student);
+            log.info("✅ [SINGLE-SOURCE] Fee updated: Applied=₹{}, Remaining=₹{}, AllPaid={}",
+                    termFeeResponse.getAppliedPayment(),
+                    termFeeResponse.getRemainingPayment(),
+                    termFeeResponse.getAllPaid());
 
-            log.info("💰 FEE UPDATED: {} received ₹{} via {} (Ref: {})",
-                    student.getFullName(),
-                    paymentAmount,
-                    source,
-                    transactionReference);
-            log.info("   📊 Total Paid: ₹{} → Pending: ₹{} → Status: {}",
-                    newPaidAmount,
-                    pendingAmount,
-                    student.getFeeStatus());
+            return termFeeResponse;
 
-            return savedStudent;
-
-        } catch (Exception e) {
-            log.error("❌ Error updating fee for student {}: {}",
-                    student.getFullName(), e.getMessage(), e);
-            throw new RuntimeException("Failed to update student fee: " + e.getMessage(), e);
+        } finally {
+            lock.unlock();
+            // Clean up lock if no one is waiting
+            if (!lock.isLocked() && lock.getQueueLength() == 0) {
+                studentLocks.remove(studentId);
+            }
         }
     }
 
     /**
-     * Batch update multiple students from transactions
+     * Update from bank transaction
      */
-    public void batchUpdateFeesFromBankTransactions(Map<Student, List<BankTransaction>> studentTransactionsMap) {
-        if (studentTransactionsMap == null || studentTransactionsMap.isEmpty()) {
-            log.info("No student transactions to update");
-            return;
+    @Transactional
+    public PaymentApplicationResponse updateFeeFromBankTransaction(BankTransaction bankTransaction) {
+        if (bankTransaction.getStudent() == null) {
+            throw new IllegalArgumentException("Bank transaction has no student assigned");
         }
 
-        log.info("🔄 Starting batch fee update for {} students", studentTransactionsMap.size());
+        return updateStudentFeeFromPayment(
+                bankTransaction.getStudent().getId(),
+                bankTransaction.getAmount(),
+                bankTransaction.getBankReference(),
+                "Auto-matched from bank import",
+                "BANK_TRANSACTION"
+        );
+    }
 
-        studentTransactionsMap.forEach((student, transactions) -> {
+    /**
+     * Update from payment transaction
+     */
+    @Transactional
+    public PaymentApplicationResponse updateFeeFromPaymentTransaction(PaymentTransaction paymentTransaction) {
+        if (paymentTransaction.getStudent() == null) {
+            throw new IllegalArgumentException("Payment transaction has no student assigned");
+        }
+
+        return updateStudentFeeFromPayment(
+                paymentTransaction.getStudent().getId(),
+                paymentTransaction.getAmount(),
+                paymentTransaction.getReceiptNumber(),
+                paymentTransaction.getNotes(),
+                "PAYMENT_TRANSACTION"
+        );
+    }
+
+    /**
+     * Manual payment application
+     */
+    @Transactional
+    public PaymentApplicationResponse applyManualPayment(Long studentId, Double amount,
+                                                         String reference, String notes) {
+        return updateStudentFeeFromPayment(
+                studentId,
+                amount,
+                reference,
+                notes,
+                "MANUAL_PAYMENT"
+        );
+    }
+
+    /**
+     * Batch update multiple payments (optimized)
+     */
+    @Transactional
+    public Map<Long, PaymentApplicationResponse> batchUpdateFees(
+            Map<Long, List<PaymentApplicationRequest>> paymentsByStudent) {
+
+        log.info("🔄 [BATCH] Updating fees for {} students", paymentsByStudent.size());
+        Map<Long, PaymentApplicationResponse> results = new ConcurrentHashMap<>();
+
+        paymentsByStudent.forEach((studentId, payments) -> {
             try {
-                Double totalPayment = transactions.stream()
-                        .mapToDouble(BankTransaction::getAmount)
+                double totalAmount = payments.stream()
+                        .mapToDouble(PaymentApplicationRequest::getAmount)
                         .sum();
 
-                if (totalPayment > 0) {
-                    updateFeePayment(student, totalPayment,
-                            "BATCH_" + transactions.get(0).getImportBatchId(),
-                            "BATCH_BANK_TX");
-
-                    log.debug("   {}: Applied ₹{} from {} transaction(s)",
-                            student.getFullName(), totalPayment, transactions.size());
+                if (totalAmount > 0) {
+                    PaymentApplicationResponse response = updateStudentFeeFromPayment(
+                            studentId,
+                            totalAmount,
+                            "BATCH_" + System.currentTimeMillis(),
+                            "Batch payment update",
+                            "BATCH_UPDATE"
+                    );
+                    results.put(studentId, response);
                 }
             } catch (Exception e) {
-                log.error("Error in batch update for student {}: {}", student.getFullName(), e.getMessage());
+                log.error("❌ Failed batch update for student {}: {}", studentId, e.getMessage());
+
             }
         });
 
-        log.info("✅ Batch fee update completed");
+        return results;
     }
 
+    // ========== OPTIMIZED UPDATE METHODS ==========
+
     /**
-     * Revert a fee payment (if transaction is deleted or unmatched)
+     * Optimized student fee summary update (no full recalculation)
      */
-    public Student revertFeePayment(Student student, Double paymentAmount, String reason) {
-        if (student == null || paymentAmount == null || paymentAmount <= 0) {
-            log.warn("Invalid fee revert request: student={}, amount={}", student, paymentAmount);
-            return student;
-        }
-
+    private void updateStudentFeeSummaryOptimized(Long studentId) {
         try {
-            Double currentPaid = student.getPaidAmount() != null ? student.getPaidAmount() : 0.0;
-            Double totalFee = student.getTotalFee() != null ? student.getTotalFee() : 0.0;
+            // Get fresh data from database with optimized query
+            Student student = studentRepository.findById(studentId)
+                    .orElseThrow(() -> new RuntimeException("Student not found: " + studentId));
 
-            // Ensure we don't go negative
-            Double newPaidAmount = Math.max(0, currentPaid - paymentAmount);
-            student.setPaidAmount(newPaidAmount);
+            // Use database view or direct calculation
+            recalculateStudentFeeFromView(student);
 
-            // Recalculate pending amount
-            Double pendingAmount = Math.max(0, totalFee - newPaidAmount);
-            student.setPendingAmount(pendingAmount);
+            student.setLastFeeUpdate(LocalDateTime.now());
+            studentRepository.save(student);
 
-            // Update fee status
-            updateFeeStatus(student, newPaidAmount, totalFee);
-
-            // Update timestamp
-            student.setUpdatedAt(LocalDateTime.now());
-
-            Student savedStudent = studentRepository.save(student);
-
-            log.info("↩️ FEE REVERTED: {} reversed ₹{} (Reason: {})",
-                    student.getFullName(),
-                    paymentAmount,
-                    reason);
-            log.info("   📊 Total Paid: ₹{} → Pending: ₹{} → Status: {}",
-                    newPaidAmount,
-                    pendingAmount,
-                    student.getFeeStatus());
-
-            return savedStudent;
+            log.debug("✅ Optimized fee summary updated for student {}", studentId);
 
         } catch (Exception e) {
-            log.error("❌ Error reverting fee for student {}: {}",
-                    student.getFullName(), e.getMessage(), e);
-            throw new RuntimeException("Failed to revert student fee: " + e.getMessage(), e);
+            log.error("❌ Failed to update fee summary for student {}: {}", studentId, e.getMessage());
+            // Fallback to full recalculation
+            updateStudentFeeSummaryFallback(studentId);
         }
     }
 
     /**
-     * Get student's pending amount with detailed breakdown
+     * Recalculate from database view (optimized)
      */
-    public FeeBreakdown getFeeBreakdown(Student student) {
-        if (student == null) {
-            return FeeBreakdown.empty();
-        }
+    private void recalculateStudentFeeFromView(Student student) {
+        // This would use a materialized view in production
+        // For now, use optimized calculation
 
-        Double totalFee = student.getTotalFee() != null ? student.getTotalFee() : 0.0;
-        Double paidAmount = student.getPaidAmount() != null ? student.getPaidAmount() : 0.0;
-        Double pendingAmount = student.getPendingAmount() != null ? student.getPendingAmount() : 0.0;
+        Double totalFee = student.getTermAssignments().stream()
+                .mapToDouble(ta -> ta.getTotalTermFee() != null ? ta.getTotalTermFee() : 0.0)
+                .sum();
 
-        // Recalculate if pending doesn't match
-        Double calculatedPending = Math.max(0, totalFee - paidAmount);
-        if (!calculatedPending.equals(pendingAmount)) {
-            log.warn("⚠️ Pending amount mismatch for {}: DB={}, Calculated={}",
-                    student.getFullName(), pendingAmount, calculatedPending);
-            pendingAmount = calculatedPending;
-        }
+        Double paidAmount = student.getTermAssignments().stream()
+                .mapToDouble(ta -> ta.getPaidAmount() != null ? ta.getPaidAmount() : 0.0)
+                .sum();
 
-        return FeeBreakdown.builder()
-                .studentId(student.getId())
-                .studentName(student.getFullName())
-                .totalFee(totalFee)
-                .paidAmount(paidAmount)
-                .pendingAmount(pendingAmount)
-                .feeStatus(student.getFeeStatus())
-                .paymentPercentage(totalFee > 0 ? (paidAmount / totalFee) * 100 : 0.0)
-                .build();
-    }
+        Double pendingAmount = Math.max(0, totalFee - paidAmount);
 
-    /**
-     * Recalculate all students' pending amounts (fix data inconsistencies)
-     */
-    public void recalculateAllPendingAmounts() {
-        log.info("🔧 Recalculating pending amounts for all students...");
+        // Update only what changed
+        student.setTotalFee(totalFee);
+        student.setPaidAmount(paidAmount);
+        student.setPendingAmount(pendingAmount);
 
-        List<Student> allStudents = studentRepository.findAll();
-        int updatedCount = 0;
-
-        for (Student student : allStudents) {
-            try {
-                Double totalFee = student.getTotalFee();
-                Double paidAmount = student.getPaidAmount();
-
-                if (totalFee != null && paidAmount != null) {
-                    Double calculatedPending = Math.max(0, totalFee - paidAmount);
-                    Double currentPending = student.getPendingAmount();
-
-                    // Update if different
-                    if (!calculatedPending.equals(currentPending)) {
-                        student.setPendingAmount(calculatedPending);
-                        updateFeeStatus(student, paidAmount, totalFee);
-                        studentRepository.save(student);
-                        updatedCount++;
-
-                        log.debug("   Updated {}: Pending ₹{} → ₹{}",
-                                student.getFullName(), currentPending, calculatedPending);
-                    }
-                }
-            } catch (Exception e) {
-                log.error("Error recalculating for student {}: {}", student.getId(), e.getMessage());
-            }
-        }
-
-        log.info("✅ Recalculation complete: Updated {}/{} students", updatedCount, allStudents.size());
-    }
-
-    /**
-     * Helper method to update fee status based on paid amount
-     */
-    private void updateFeeStatus(Student student, Double paidAmount, Double totalFee) {
+        // Update fee status (simplified)
         if (paidAmount >= totalFee) {
             student.setFeeStatus(Student.FeeStatus.PAID);
         } else if (paidAmount > 0) {
-            // Check if overdue (more than 30 days since last payment/admission)
-            if (isPaymentOverdue(student)) {
-                student.setFeeStatus(Student.FeeStatus.OVERDUE);
-            } else {
-                student.setFeeStatus(Student.FeeStatus.PENDING);
-            }
+            // Check for overdue
+            boolean hasOverdue = student.getTermAssignments().stream()
+                    .anyMatch(ta -> ta.getTermFeeStatus() ==
+                            com.system.SchoolManagementSystem.termmanagement.entity.StudentTermAssignment.FeeStatus.OVERDUE);
+            student.setFeeStatus(hasOverdue ? Student.FeeStatus.OVERDUE : Student.FeeStatus.PARTIAL);
         } else {
             student.setFeeStatus(Student.FeeStatus.PENDING);
         }
     }
 
     /**
-     * Check if payment is overdue (more than 30 days)
+     * Fallback method - uses full recalculation
      */
-    private boolean isPaymentOverdue(Student student) {
-        // You can customize this logic based on your business rules
-        // For now, check if admission was more than 30 days ago
-        if (student.getAdmissionDate() != null) {
-            return student.getAdmissionDate().isBefore(
-                    java.time.LocalDate.now().minusDays(30)
-            );
+    private void updateStudentFeeSummaryFallback(Long studentId) {
+        Student student = studentRepository.findById(studentId)
+                .orElseThrow(() -> new RuntimeException("Student not found: " + studentId));
+
+        student.updateFeeSummary();
+        student.setLastFeeUpdate(LocalDateTime.now());
+        studentRepository.save(student);
+
+        log.warn("⚠️ Used fallback fee update for student {}", studentId);
+    }
+
+    // ========== REVERSAL METHODS ==========
+
+    /**
+     * Revert a fee payment
+     */
+    @Transactional
+    public PaymentApplicationResponse revertPayment(Long studentId, Double amount,
+                                                    String reference, String reason) {
+
+        log.warn("↩️ [REVERT] Reverting payment for student {}: ₹{} (Reason: {})",
+                studentId, amount, reason);
+
+        // Create negative payment request
+        PaymentApplicationRequest revertRequest = new PaymentApplicationRequest();
+        revertRequest.setStudentId(studentId);
+        revertRequest.setAmount(-amount); // Negative amount for reversal
+        revertRequest.setReference("REVERT_" + reference);
+        revertRequest.setNotes("Payment reversal: " + reason);
+        revertRequest.setApplyToFutureTerms(false);
+
+        PaymentApplicationResponse revertResponse = termFeeService.applyPaymentToStudent(revertRequest);
+
+        // Update student summary
+        updateStudentFeeSummaryOptimized(studentId);
+
+        return revertResponse;
+    }
+
+    // ========== VALIDATION METHODS ==========
+
+    /**
+     * Validate if student can receive payment
+     */
+    public void validateStudentForPayment(Long studentId) {
+        Student student = studentRepository.findById(studentId)
+                .orElseThrow(() -> new RuntimeException("Student not found: " + studentId));
+
+        // Check student status
+        if (student.getStatus() != Student.StudentStatus.ACTIVE) {
+            throw new IllegalStateException(
+                    String.format("Student %s is not active (status: %s)",
+                            student.getFullName(), student.getStatus()));
         }
-        return false;
+
+
     }
 
     /**
-     * DTO for fee breakdown
+     * Get student fee summary (cached/optimized)
      */
-    @Data
-    @Builder
-    public static class FeeBreakdown {
+    public StudentFeeSummary getStudentFeeSummary(Long studentId) {
+        Student student = studentRepository.findById(studentId)
+                .orElseThrow(() -> new RuntimeException("Student not found: " + studentId));
+
+        return StudentFeeSummary.builder()
+                .studentId(studentId)
+                .studentName(student.getFullName())
+                .grade(student.getGrade())
+                .totalFee(student.getTotalFee() != null ? student.getTotalFee() : 0.0)
+                .paidAmount(student.getPaidAmount() != null ? student.getPaidAmount() : 0.0)
+                .pendingAmount(student.getPendingAmount() != null ? student.getPendingAmount() : 0.0)
+                .feeStatus(student.getFeeStatus())
+                .lastFeeUpdate(student.getLastFeeUpdate())
+                .hasOverdueFees(student.hasOverdueFees())
+                .overdueAmount(student.getOverdueAmount())
+                .paymentPercentage(student.getPaymentPercentage())
+                .build();
+    }
+
+    /**
+     * Force refresh of student fee data
+     */
+    @Transactional
+    public void refreshStudentFeeData(Long studentId) {
+        log.info("🔄 Force refreshing fee data for student {}", studentId);
+
+        // Evict any cache
+        // cacheService.evictStudentFeeCache(studentId);
+
+        // Update from database
+        updateStudentFeeSummaryFallback(studentId);
+    }
+
+    // ========== DTO CLASSES ==========
+
+    @lombok.Data
+    @lombok.Builder
+    public static class StudentFeeSummary {
         private Long studentId;
         private String studentName;
+        private String grade;
         private Double totalFee;
         private Double paidAmount;
         private Double pendingAmount;
         private Student.FeeStatus feeStatus;
-        private Double paymentPercentage; // 0-100
-
-        public static FeeBreakdown empty() {
-            return FeeBreakdown.builder()
-                    .totalFee(0.0)
-                    .paidAmount(0.0)
-                    .pendingAmount(0.0)
-                    .paymentPercentage(0.0)
-                    .build();
-        }
+        private LocalDateTime lastFeeUpdate;
+        private Boolean hasOverdueFees;
+        private Double overdueAmount;
+        private Double paymentPercentage;
 
         public String getPaymentProgress() {
-            return String.format("%.1f%%", paymentPercentage);
+            return String.format("%.1f%%", paymentPercentage != null ? paymentPercentage : 0.0);
         }
     }
 }

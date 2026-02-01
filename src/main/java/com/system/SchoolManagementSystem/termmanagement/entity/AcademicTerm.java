@@ -22,10 +22,12 @@ import java.util.Set;
 @AllArgsConstructor
 @ToString(exclude = {"gradeTermFees", "studentTermAssignments"})
 @Slf4j
+@EqualsAndHashCode(onlyExplicitlyIncluded = true) // Add this
 public class AcademicTerm {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @EqualsAndHashCode.Include // Add this
     private Long id;
 
     @Column(name = "term_name", nullable = false, length = 50)

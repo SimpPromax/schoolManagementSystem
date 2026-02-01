@@ -17,6 +17,7 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @ToString(exclude = "academicTerm")
+@EqualsAndHashCode(onlyExplicitlyIncluded = true) // Add this
 public class GradeTermFee {
 
     @Id
@@ -26,6 +27,7 @@ public class GradeTermFee {
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "academic_term_id", nullable = false)
     @JsonBackReference
+    @EqualsAndHashCode.Include // Add this
     private AcademicTerm academicTerm;
 
     @Column(nullable = false, length = 20)

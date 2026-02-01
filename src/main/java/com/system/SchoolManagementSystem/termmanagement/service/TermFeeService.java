@@ -21,6 +21,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
@@ -46,6 +47,10 @@ public class TermFeeService {
         double value;
         DoubleHolder(double value) { this.value = value; }
     }
+
+    // Cache for frequently accessed data
+    private final Map<Long, List<TermFeeItem>> studentFeeItemCache = new ConcurrentHashMap<>();
+    private final Map<String, GradeTermFee> gradeFeeCache = new ConcurrentHashMap<>();
 
     // ========== FEE STRUCTURE MANAGEMENT ==========
 
@@ -222,6 +227,20 @@ public class TermFeeService {
         }
 
         return exists;
+    }
+
+    /**
+     * Update fee structure status
+     */
+    @Transactional
+    public boolean updateFeeStructureStatus(Long structureId, Boolean isActive) {
+        return gradeTermFeeRepository.findById(structureId)
+                .map(structure -> {
+                    structure.setIsActive(isActive);
+                    gradeTermFeeRepository.save(structure);
+                    return true;
+                })
+                .orElse(false);
     }
 
     // ========== AUTO-BILLING ==========
@@ -506,39 +525,56 @@ public class TermFeeService {
         // Also update the fee assignment summary
         updateStudentFeeAssignment(student.getId());
 
-        log.info("Auto-billed student {} (grade: {}) for term {}: KES {}",
+        log.info("Auto-billed student {} (grade: {}) for term {}: ₹{}",
                 student.getFullName(), studentGrade, term.getTermName(), assignment.getTotalTermFee());
         return true;
     }
 
-    // ========== PAYMENT PROCESSING ==========
+    // ========== PAYMENT PROCESSING (OPTIMIZED) ==========
 
     /**
-     * Apply payment to student's fee items (FIFO logic)
+     * Apply payment to student's fee items (FIFO logic) - OPTIMIZED
      */
     @Transactional
     public PaymentApplicationResponse applyPaymentToStudent(PaymentApplicationRequest request) {
+        long startTime = System.currentTimeMillis();
+
         Student student = studentRepository.findById(request.getStudentId())
                 .orElseThrow(() -> new RuntimeException("Student not found: " + request.getStudentId()));
 
-        log.info("Applying payment of KES {} to student {}", request.getAmount(), student.getFullName());
+        log.info("💰 Applying payment of ₹{} to student {}", request.getAmount(), student.getFullName());
 
         PaymentApplicationResponse response = PaymentApplicationResponse.fromStudent(student, request.getAmount());
         DoubleHolder remainingPaymentHolder = new DoubleHolder(request.getAmount());
 
-        // Get unpaid items ordered by due date (FIFO)
-        List<TermFeeItem> unpaidItems = termFeeItemRepository
-                .findUnpaidItemsByStudentOrdered(student.getId());
+        // OPTIMIZATION: Get unpaid items with single query (ordered by due date)
+        List<TermFeeItem> unpaidItems = getUnpaidItemsOptimized(request.getStudentId());
 
-        // Apply payment to overdue items first, then pending
-        applyPaymentToItems(unpaidItems, remainingPaymentHolder, response);
+        if (unpaidItems.isEmpty()) {
+            log.warn("⚠️ No unpaid fee items found for student {}", student.getFullName());
+            response.setAppliedPayment(0.0);
+            response.setRemainingPayment(request.getAmount());
+            response.setAllPaid(true);
+            return response;
+        }
 
-        // Update all related entities
-        updateAfterPayment(student.getId());
+        // Apply payment to overdue items first, then pending (FIFO)
+        applyPaymentToItemsOptimized(unpaidItems, remainingPaymentHolder, response);
+
+        // Bulk save updated items
+        if (!response.getAppliedItems().isEmpty()) {
+            termFeeItemRepository.saveAll(unpaidItems.stream()
+                    .filter(item -> item.getStatus() == TermFeeItem.FeeStatus.PAID ||
+                            item.getStatus() == TermFeeItem.FeeStatus.PARTIAL)
+                    .collect(Collectors.toList()));
+        }
+
+        // Update term assignments in bulk
+        updateTermAssignmentsAfterPayment(request.getStudentId());
 
         // Handle any overpayment
         if (remainingPaymentHolder.value > 0) {
-            handleOverpayment(student, remainingPaymentHolder.value, request);
+            handleOverpaymentOptimized(student, remainingPaymentHolder.value, request);
         }
 
         response.calculateAppliedTotal();
@@ -546,10 +582,252 @@ public class TermFeeService {
         response.setAllPaid(unpaidItems.stream().allMatch(
                 item -> item.getStatus() == TermFeeItem.FeeStatus.PAID));
 
-        log.info("Payment applied: KES {} used, KES {} remaining",
-                request.getAmount() - remainingPaymentHolder.value, remainingPaymentHolder.value);
+        // Clear cache for this student
+        studentFeeItemCache.remove(request.getStudentId());
+
+        long duration = System.currentTimeMillis() - startTime;
+        log.info("✅ Payment applied in {}ms: ₹{} used, ₹{} remaining, All paid: {}",
+                duration, request.getAmount() - remainingPaymentHolder.value,
+                remainingPaymentHolder.value, response.getAllPaid());
 
         return response;
+    }
+
+    /**
+     * OPTIMIZED: Get unpaid items with single query
+     */
+    private List<TermFeeItem> getUnpaidItemsOptimized(Long studentId) {
+        // Check cache first
+        if (studentFeeItemCache.containsKey(studentId)) {
+            log.debug("📦 Using cached fee items for student {}", studentId);
+            return studentFeeItemCache.get(studentId);
+        }
+
+        // Single optimized query
+        List<TermFeeItem> unpaidItems = termFeeItemRepository
+                .findUnpaidItemsByStudentOrdered(studentId);
+
+        // Cache for future use (with TTL in production)
+        studentFeeItemCache.put(studentId, unpaidItems);
+
+        return unpaidItems;
+    }
+
+    /**
+     * OPTIMIZED: Apply payment to items (batch processing)
+     */
+    private void applyPaymentToItemsOptimized(List<TermFeeItem> items, DoubleHolder remainingPaymentHolder,
+                                              PaymentApplicationResponse response) {
+
+        List<PaymentApplicationResponse.AppliedItem> appliedItems = new ArrayList<>();
+
+        for (TermFeeItem item : items) {
+            if (remainingPaymentHolder.value <= 0) break;
+
+            double pendingAmount = item.getPendingAmount();
+            double amountToApply = Math.min(remainingPaymentHolder.value, pendingAmount);
+
+            if (amountToApply > 0) {
+                PaymentApplicationResponse.AppliedItem appliedItem =
+                        new PaymentApplicationResponse.AppliedItem();
+                appliedItem.setItemId(item.getId());
+                appliedItem.setItemName(item.getItemName());
+                appliedItem.setFeeType(item.getFeeType().name());
+                appliedItem.setAmountApplied(amountToApply);
+
+                item.setPaidAmount(item.getPaidAmount() + amountToApply);
+                item.setPendingAmount(pendingAmount - amountToApply);
+
+                // Update item status
+                if (item.getPaidAmount() >= item.getAmount()) {
+                    item.setStatus(TermFeeItem.FeeStatus.PAID);
+                } else if (item.getPaidAmount() > 0) {
+                    item.setStatus(TermFeeItem.FeeStatus.PARTIAL);
+                }
+
+                appliedItem.setNewStatus(item.getStatus().name());
+                appliedItem.setRemainingBalance(remainingPaymentHolder.value - amountToApply);
+                appliedItems.add(appliedItem);
+
+                remainingPaymentHolder.value -= amountToApply;
+
+                log.debug("   Applied ₹{} to {} (Remaining: ₹{})",
+                        amountToApply, item.getItemName(), item.getPendingAmount());
+            }
+        }
+
+        response.setAppliedItems(appliedItems);
+    }
+
+    /**
+     * OPTIMIZED: Update term assignments after payment
+     */
+    private void updateTermAssignmentsAfterPayment(Long studentId) {
+        // Get all term assignments for this student
+        List<StudentTermAssignment> assignments = studentTermAssignmentRepository
+                .findByStudentId(studentId);
+
+        // Update each assignment
+        for (StudentTermAssignment assignment : assignments) {
+            assignment.calculateAmounts();
+        }
+
+        // Bulk save
+        if (!assignments.isEmpty()) {
+            studentTermAssignmentRepository.saveAll(assignments);
+        }
+
+        // Update student fee assignment
+        updateStudentFeeAssignmentOptimized(studentId);
+    }
+
+    /**
+     * OPTIMIZED: Update student fee assignment
+     */
+    private void updateStudentFeeAssignmentOptimized(Long studentId) {
+        // Get current academic year
+        Optional<AcademicTerm> currentTerm = termService.getCurrentTerm();
+        if (currentTerm.isEmpty()) return;
+
+        String academicYear = currentTerm.get().getAcademicYear();
+
+        studentFeeAssignmentRepository
+                .findByStudentIdAndAcademicYear(studentId, academicYear)
+                .ifPresent(this::recalculateFeeAssignmentOptimized);
+    }
+
+    /**
+     * OPTIMIZED: Recalculate fee assignment
+     */
+    private void recalculateFeeAssignmentOptimized(StudentFeeAssignment assignment) {
+        // Single query to get term assignments for academic year
+        List<StudentTermAssignment> termAssignments = getTermAssignmentsForAcademicYear(
+                assignment.getStudent().getId(), assignment.getAcademicYear());
+
+        double total = termAssignments.stream()
+                .mapToDouble(StudentTermAssignment::getTotalTermFee)
+                .sum();
+        double paid = termAssignments.stream()
+                .mapToDouble(StudentTermAssignment::getPaidAmount)
+                .sum();
+        double pending = total - paid;
+
+        assignment.setTotalAmount(total);
+        assignment.setPaidAmount(paid);
+        assignment.setPendingAmount(pending);
+
+        // Update status
+        if (pending <= 0) {
+            assignment.setFeeStatus(FeeStatus.PAID);
+        } else if (paid > 0) {
+            assignment.setFeeStatus(FeeStatus.PARTIAL);
+        } else if (assignment.getDueDate() != null &&
+                LocalDate.now().isAfter(assignment.getDueDate())) {
+            assignment.setFeeStatus(FeeStatus.OVERDUE);
+        } else {
+            assignment.setFeeStatus(FeeStatus.PENDING);
+        }
+
+        assignment.setUpdatedAt(LocalDateTime.now());
+        studentFeeAssignmentRepository.save(assignment);
+    }
+
+    /**
+     * OPTIMIZED: Handle overpayment
+     */
+    private void handleOverpaymentOptimized(Student student, Double amount, PaymentApplicationRequest request) {
+        if (Boolean.TRUE.equals(request.getApplyToFutureTerms())) {
+            applyOverpaymentToFutureTermsOptimized(student, amount);
+        } else {
+            createPaymentCreditOptimized(student, amount, request.getReference());
+        }
+        log.info("💸 Overpayment of ₹{} for student {}", amount, student.getFullName());
+    }
+
+    /**
+     * OPTIMIZED: Apply overpayment to future terms
+     */
+    private void applyOverpaymentToFutureTermsOptimized(Student student, Double amount) {
+        List<AcademicTerm> upcomingTerms = termService.getUpcomingAndCurrentTerms();
+        DoubleHolder amountHolder = new DoubleHolder(amount);
+
+        for (AcademicTerm term : upcomingTerms) {
+            if (amountHolder.value <= 0) break;
+
+            studentTermAssignmentRepository
+                    .findByStudentIdAndAcademicTermId(student.getId(), term.getId())
+                    .ifPresent(assignment ->
+                            amountHolder.value = applyPaymentToTermAssignmentOptimized(assignment, amountHolder.value));
+        }
+
+        if (amountHolder.value > 0) {
+            createPaymentCreditOptimized(student, amountHolder.value, "Overpayment Credit");
+        }
+    }
+
+    /**
+     * OPTIMIZED: Apply payment to term assignment
+     */
+    private double applyPaymentToTermAssignmentOptimized(StudentTermAssignment assignment, double amount) {
+        List<TermFeeItem> unpaidItems = termFeeItemRepository
+                .findByStudentTermAssignmentId(assignment.getId());
+
+        DoubleHolder amountHolder = new DoubleHolder(amount);
+
+        for (TermFeeItem item : unpaidItems) {
+            if (amountHolder.value <= 0) break;
+
+            double pending = item.getPendingAmount();
+            double toApply = Math.min(amountHolder.value, pending);
+
+            if (toApply > 0) {
+                item.setPaidAmount(item.getPaidAmount() + toApply);
+                item.setPendingAmount(pending - toApply);
+                amountHolder.value -= toApply;
+            }
+        }
+
+        // Save all updated items
+        if (amountHolder.value < amount) {
+            termFeeItemRepository.saveAll(unpaidItems);
+            assignment.calculateAmounts();
+            studentTermAssignmentRepository.save(assignment);
+        }
+
+        return amountHolder.value;
+    }
+
+    /**
+     * OPTIMIZED: Create payment credit
+     */
+    private void createPaymentCreditOptimized(Student student, Double amount, String reference) {
+        termService.getCurrentTerm().ifPresent(currentTerm -> {
+            StudentTermAssignment assignment = studentTermAssignmentRepository
+                    .findByStudentIdAndAcademicTermId(student.getId(), currentTerm.getId())
+                    .orElseGet(() -> {
+                        StudentTermAssignment newAssignment = createStudentTermAssignment(student, currentTerm);
+                        return studentTermAssignmentRepository.save(newAssignment);
+                    });
+
+            TermFeeItem creditItem = TermFeeItem.builder()
+                    .studentTermAssignment(assignment)
+                    .itemName("Payment Credit")
+                    .feeType(TermFeeItem.FeeType.DISCOUNT)
+                    .itemType("DISCOUNT")
+                    .amount(-amount)
+                    .originalAmount(-amount)
+                    .dueDate(currentTerm.getFeeDueDate())
+                    .isAutoGenerated(false)
+                    .isMandatory(false)
+                    .sequenceOrder(999)
+                    .notes(String.format("Credit from payment %s", reference))
+                    .build();
+
+            termFeeItemRepository.save(creditItem);
+            assignment.addFeeItem(creditItem);
+            assignment.calculateAmounts();
+            studentTermAssignmentRepository.save(assignment);
+        });
     }
 
     // ========== ADDITIONAL FEES ==========
@@ -581,7 +859,7 @@ public class TermFeeService {
         updateStudentFeeAssignment(student.getId());
         updateStudentFeeSummary(student.getId());
 
-        log.info("Added additional fee item '{}' (KES {}) for student {}",
+        log.info("Added additional fee item '{}' (₹{}) for student {}",
                 request.getItemName(), request.getAmount(), student.getFullName());
 
         return savedItem;
@@ -625,6 +903,25 @@ public class TermFeeService {
      */
     public List<TermFeeItem> getStudentAdditionalFees(Long studentId) {
         return termFeeItemRepository.findAdditionalFeesForStudent(studentId);
+    }
+
+    /**
+     * Delete additional fee item
+     */
+    @Transactional
+    public boolean deleteAdditionalFee(Long feeItemId) {
+        return termFeeItemRepository.findById(feeItemId)
+                .map(item -> {
+                    if (!item.getIsAutoGenerated()) {
+                        StudentTermAssignment assignment = item.getStudentTermAssignment();
+                        termFeeItemRepository.delete(item);
+                        assignment.calculateAmounts();
+                        studentTermAssignmentRepository.save(assignment);
+                        return true;
+                    }
+                    return false;
+                })
+                .orElse(false);
     }
 
     // ========== DASHBOARD & REPORTING ==========
@@ -684,7 +981,7 @@ public class TermFeeService {
                 summary.setCurrentTermId(term.getId());
             }
 
-            // Get all active students - FIXED: Use the correct repository method
+            // Get all active students
             List<Student> activeStudents = studentRepository.findByStatus(Student.StudentStatus.ACTIVE);
 
             if (activeStudents == null || activeStudents.isEmpty()) {
@@ -703,12 +1000,11 @@ public class TermFeeService {
             long overdueStudents = 0L;
 
             for (Student student : activeStudents) {
-                // Use getter methods instead of direct field access
                 totalExpected += student.getTotalFeeAmount() != null ? student.getTotalFeeAmount() : 0.0;
                 totalCollected += student.getTotalPaidAmount() != null ? student.getTotalPaidAmount() : 0.0;
                 totalPending += student.getTotalPendingAmount() != null ? student.getTotalPendingAmount() : 0.0;
 
-                // Count students by fee status - FIXED: Use the field correctly
+                // Count students by fee status
                 Student.FeeStatus feeStatus = student.getFeeStatus();
                 if (feeStatus != null) {
                     switch (feeStatus) {
@@ -825,12 +1121,11 @@ public class TermFeeService {
 
             summary.setGradeSummaries(gradeSummaries);
 
-            log.info("Generated school fee summary: {} students, KES {} collected, {}% rate",
+            log.info("Generated school fee summary: {} students, ₹{} collected, {}% rate",
                     summary.getTotalStudents(), summary.getTotalCollected(), summary.getCollectionRate());
 
         } catch (Exception e) {
             log.error("Error generating school fee summary: {}", e.getMessage(), e);
-            // Return empty summary instead of throwing
         }
 
         return summary;
@@ -941,7 +1236,7 @@ public class TermFeeService {
                 overdueStudent.setStudentName(student.getFullName());
                 overdueStudent.setStudentCode(student.getStudentId());
                 overdueStudent.setGrade(student.getGrade());
-                overdueStudent.setClassName(student.getGrade()); // Using grade as class name since class field doesn't exist
+                overdueStudent.setClassName(student.getGrade());
                 overdueStudent.setTotalOverdueAmount(studentOverdue);
                 overdueStudent.setOverdueItemsCount(studentOverdueItems.size());
 
@@ -962,7 +1257,7 @@ public class TermFeeService {
                     overdueStudent.setDaysOverdue((int) Math.max(0, daysOverdue));
                 }
 
-                // Get parent/guardian info - using emergency contact since guardian entity doesn't exist
+                // Get parent/guardian info
                 overdueStudent.setParentName(student.getEmergencyContactName());
                 overdueStudent.setParentPhone(student.getEmergencyContactPhone());
                 overdueStudent.setParentEmail(student.getEmail());
@@ -1313,7 +1608,7 @@ public class TermFeeService {
                     boolean sentSuccessfully = false;
                     String messageId = "MSG-" + System.currentTimeMillis() + "-" + studentId;
 
-                    // Simulate sending reminders - using emergency contact instead of guardian
+                    // Simulate sending reminders
                     if (sendSms && student.getEmergencyContactPhone() != null) {
 
                         ReminderResult.DeliveryStatus smsStatus = new ReminderResult.DeliveryStatus();
@@ -1325,7 +1620,7 @@ public class TermFeeService {
                         deliveryStatuses.add(smsStatus);
 
                         smsCount++;
-                        estimatedCost += 1.5; // Assume KES 1.5 per SMS
+                        estimatedCost += 1.5; // Assume ₹1.5 per SMS
                         sentSuccessfully = true;
                     }
 
@@ -1592,7 +1887,7 @@ public class TermFeeService {
         response.setTermName(term.getTermName());
         response.setAcademicYear(term.getAcademicYear());
         response.setRegeneratedAt(LocalDateTime.now());
-        response.setRegeneratedBy("SYSTEM"); // In real implementation, get from security context
+        response.setRegeneratedBy("SYSTEM");
         response.setReasonForRegeneration("Manual regeneration request");
         response.setReferenceNumber("REGEN-" + System.currentTimeMillis());
 
@@ -1654,8 +1949,6 @@ public class TermFeeService {
         // Compare fee items
         List<RegenerateBillResponse.FeeItemComparison> itemComparison = new ArrayList<>();
         if (previousAssignmentOpt.isPresent()) {
-            // In a real implementation, compare previous and new fee items
-            // For now, we'll just note the counts changed
             RegenerateBillResponse.FeeItemComparison comparison =
                     new RegenerateBillResponse.FeeItemComparison();
             comparison.setItemName("All Items");
@@ -1681,42 +1974,7 @@ public class TermFeeService {
         return studentTermAssignmentRepository.findByStudentId(studentId);
     }
 
-    // ========== FEE ITEM MANAGEMENT ==========
-
-    /**
-     * Delete additional fee item
-     */
-    @Transactional
-    public boolean deleteAdditionalFee(Long feeItemId) {
-        return termFeeItemRepository.findById(feeItemId)
-                .map(item -> {
-                    if (!item.getIsAutoGenerated()) {
-                        StudentTermAssignment assignment = item.getStudentTermAssignment();
-                        termFeeItemRepository.delete(item);
-                        assignment.calculateAmounts();
-                        studentTermAssignmentRepository.save(assignment);
-                        return true;
-                    }
-                    return false;
-                })
-                .orElse(false);
-    }
-
-    /**
-     * Update fee structure status
-     */
-    @Transactional
-    public boolean updateFeeStructureStatus(Long structureId, Boolean isActive) {
-        return gradeTermFeeRepository.findById(structureId)
-                .map(structure -> {
-                    structure.setIsActive(isActive);
-                    gradeTermFeeRepository.save(structure);
-                    return true;
-                })
-                .orElse(false);
-    }
-
-    // ========== PRIVATE HELPER METHODS ==========
+    // ========== HELPER METHODS ==========
 
     private GradeTermFee createFeeStructure(FeeStructureRequest request) {
         return GradeTermFee.builder()
@@ -1819,7 +2077,7 @@ public class TermFeeService {
 
         assignment.setFeeItems(feeItems);
 
-        log.info("📋 Created {} fee items totaling KES {}",
+        log.info("📋 Created {} fee items totaling ₹{}",
                 feeItems.size(),
                 feeItems.stream().mapToDouble(TermFeeItem::getAmount).sum());
     }
@@ -1889,42 +2147,6 @@ public class TermFeeService {
         }
     }
 
-    private void applyPaymentToItems(List<TermFeeItem> items, DoubleHolder remainingPaymentHolder,
-                                     PaymentApplicationResponse response) {
-        for (TermFeeItem item : items) {
-            if (remainingPaymentHolder.value <= 0) break;
-
-            double pendingAmount = item.getPendingAmount();
-            double amountToApply = Math.min(remainingPaymentHolder.value, pendingAmount);
-
-            if (amountToApply > 0) {
-                PaymentApplicationResponse.AppliedItem appliedItem =
-                        new PaymentApplicationResponse.AppliedItem();
-                appliedItem.setItemId(item.getId());
-                appliedItem.setItemName(item.getItemName());
-                appliedItem.setFeeType(item.getFeeType().name());
-                appliedItem.setAmountApplied(amountToApply);
-
-                item.setPaidAmount(item.getPaidAmount() + amountToApply);
-                item.setPendingAmount(pendingAmount - amountToApply);
-
-                // Update item status
-                if (item.getPaidAmount() >= item.getAmount()) {
-                    item.setStatus(TermFeeItem.FeeStatus.PAID);
-                } else if (item.getPaidAmount() > 0) {
-                    item.setStatus(TermFeeItem.FeeStatus.PARTIAL);
-                }
-
-                appliedItem.setNewStatus(item.getStatus().name());
-                appliedItem.setRemainingBalance(remainingPaymentHolder.value - amountToApply);
-                response.addAppliedItem(appliedItem);
-
-                termFeeItemRepository.save(item);
-                remainingPaymentHolder.value -= amountToApply;
-            }
-        }
-    }
-
     private void updateAfterPayment(Long studentId) {
         updateTermAssignments(studentId);
         updateStudentFeeAssignment(studentId);
@@ -1973,7 +2195,6 @@ public class TermFeeService {
 
     private void updateStudentFeeSummary(Long studentId) {
         studentRepository.findById(studentId).ifPresent(student -> {
-            // Update student's fee summary from term assignments
             student.updateFeeSummary();
             studentRepository.save(student);
         });
@@ -1985,13 +2206,12 @@ public class TermFeeService {
         } else {
             createPaymentCredit(student, amount, request.getReference());
         }
-        log.info("Overpayment of KES {} for student {}", amount, student.getFullName());
+        log.info("Overpayment of ₹{} for student {}", amount, student.getFullName());
     }
 
     private void applyOverpaymentToFutureTerms(Student student, Double amount) {
         List<AcademicTerm> upcomingTerms = termService.getUpcomingAndCurrentTerms();
 
-        // Create a mutable wrapper for the amount
         DoubleHolder amountHolder = new DoubleHolder(amount);
 
         for (AcademicTerm term : upcomingTerms) {
@@ -2073,7 +2293,6 @@ public class TermFeeService {
                 .isAutoGenerated(false)
                 .isMandatory(request.getIsMandatory())
                 .sequenceOrder(nextSequence)
-                .status(TermFeeItem.FeeStatus.PENDING)
                 .status(getInitialFeeStatus(request.getDueDate()))
                 .notes(request.getNotes())
                 .build();
@@ -2192,7 +2411,6 @@ public class TermFeeService {
                     .isAutoGenerated(true)
                     .isMandatory(true)
                     .sequenceOrder(sequence)
-                    .status(TermFeeItem.FeeStatus.PENDING)
                     .status(getInitialFeeStatus(dueDate))
                     .build());
         }
@@ -2213,7 +2431,6 @@ public class TermFeeService {
                     .isAutoGenerated(true)
                     .isMandatory(true)
                     .sequenceOrder(sequence)
-                    .status(TermFeeItem.FeeStatus.PENDING)
                     .status(getInitialFeeStatus(dueDate))
                     .build());
         }
@@ -2229,12 +2446,12 @@ public class TermFeeService {
     private PaymentHistoryResponse.PaymentDetail mapToPaymentDetail(PaymentTransaction transaction) {
         PaymentHistoryResponse.PaymentDetail detail = new PaymentHistoryResponse.PaymentDetail();
         detail.setTransactionId(transaction.getId());
-        detail.setTransactionCode(transaction.getReceiptNumber()); // Using receipt number as transaction code
+        detail.setTransactionCode(transaction.getReceiptNumber());
         detail.setAmount(transaction.getAmount());
         detail.setPaymentDate(transaction.getPaymentDate());
         detail.setPaymentMethod(transaction.getPaymentMethod() != null ? transaction.getPaymentMethod().name() : "UNKNOWN");
         detail.setReferenceNumber(transaction.getBankReference());
-        detail.setCollectedBy("ADMIN"); // Default since PaymentTransaction doesn't have collectedBy field
+        detail.setCollectedBy("ADMIN");
         detail.setStatus(transaction.getIsVerified() ? "VERIFIED" : "PENDING");
         detail.setReceiptNumber(transaction.getReceiptNumber());
 
@@ -2245,9 +2462,7 @@ public class TermFeeService {
             detail.setChequeNumber(transaction.getBankTransaction().getChequeNumber());
         }
 
-        // Note: PaymentTransaction doesn't have getFeeItems() method
-        // If you need this, you'll need to add the relationship in the PaymentTransaction entity
-        detail.setPaidItems(new ArrayList<>()); // Empty list for now
+        detail.setPaidItems(new ArrayList<>());
 
         return detail;
     }
@@ -2266,8 +2481,6 @@ public class TermFeeService {
 
     /**
      * Extract numeric part from grade string
-     * Examples: "10-A" -> "10", "11-B" -> "11", "12" -> "12"
-     *           "Grade 10" -> "10", "10" -> "10"
      */
     private String extractNumericGrade(String grade) {
         if (grade == null || grade.trim().isEmpty()) {
@@ -2332,5 +2545,24 @@ public class TermFeeService {
             return TermFeeItem.FeeStatus.OVERDUE;
         }
         return TermFeeItem.FeeStatus.PENDING;
+    }
+
+    // ========== CLEANUP METHODS ==========
+
+    /**
+     * Clear all caches (call periodically or when data changes significantly)
+     */
+    public void clearAllCaches() {
+        studentFeeItemCache.clear();
+        gradeFeeCache.clear();
+        log.info("🧹 Cleared all term fee caches");
+    }
+
+    /**
+     * Clear cache for specific student
+     */
+    public void clearStudentCache(Long studentId) {
+        studentFeeItemCache.remove(studentId);
+        log.debug("Cleared cache for student {}", studentId);
     }
 }

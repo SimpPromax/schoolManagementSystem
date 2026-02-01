@@ -1443,6 +1443,28 @@ public class TransactionService {
 
         if (transaction.getStudent() != null) {
             Student student = transaction.getStudent();
+
+            // ========== ADD DEBUG LOGGING ==========
+            System.out.println("DEBUG ==========================================");
+            System.out.println("DEBUG Student ID: " + student.getId());
+            System.out.println("DEBUG Student Name: " + student.getFullName());
+            System.out.println("DEBUG termAssignments reference: " + student.getTermAssignments());
+            System.out.println("DEBUG termAssignments is null? " + (student.getTermAssignments() == null));
+
+            if (student.getTermAssignments() != null) {
+                System.out.println("DEBUG termAssignments size: " + student.getTermAssignments().size());
+                System.out.println("DEBUG termAssignments content: " + student.getTermAssignments());
+            }
+
+            System.out.println("DEBUG Calling getHasTermAssignments()...");
+            Boolean hasAssignments = student.getHasTermAssignments();
+            System.out.println("DEBUG getHasTermAssignments() result: " + hasAssignments);
+
+            System.out.println("DEBUG Calling getTermAssignmentCount()...");
+            Integer count = student.getTermAssignmentCount();
+            System.out.println("DEBUG getTermAssignmentCount() result: " + count);
+            System.out.println("DEBUG ==========================================");
+            // ========================================
             response.setStudentId(student.getId());
             response.setStudentName(student.getFullName());
             response.setStudentGrade(student.getGrade());
@@ -1451,6 +1473,11 @@ public class TransactionService {
             response.setStudentFeeStatus(student.getFeeStatus());
             response.setStudentTotalFee(student.getTotalFee());
             response.setStudentPaidAmount(student.getPaidAmount());
+
+            // ========== USING HELPER METHODS ==========
+            response.setHasTermAssignments(student.getHasTermAssignments());
+            response.setTermAssignmentCount(student.getTermAssignmentCount());
+            // ==========================================
 
             if (student.getPendingAmount() != null && student.getTotalFee() != null &&
                     student.getTotalFee() > 0) {
@@ -1492,6 +1519,11 @@ public class TransactionService {
             response.setStudentFeeStatus(student.getFeeStatus());
             response.setStudentTotalFee(student.getTotalFee());
             response.setStudentPaidAmount(student.getPaidAmount());
+
+            // ========== USING HELPER METHODS ==========
+            response.setHasTermAssignments(student.getHasTermAssignments());
+            response.setTermAssignmentCount(student.getTermAssignmentCount());
+            // ==========================================
 
             if (student.getPendingAmount() != null && student.getTotalFee() != null &&
                     student.getTotalFee() > 0) {

@@ -20,10 +20,12 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @ToString(exclude = {"studentTermAssignment", "feeItemTemplate"})
+@EqualsAndHashCode(onlyExplicitlyIncluded = true) // Add this
 public class TermFeeItem {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @EqualsAndHashCode.Include // Add this
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY)

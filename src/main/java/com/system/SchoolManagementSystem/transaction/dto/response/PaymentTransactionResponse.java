@@ -3,11 +3,13 @@ package com.system.SchoolManagementSystem.transaction.dto.response;
 import com.system.SchoolManagementSystem.student.entity.Student;
 import com.system.SchoolManagementSystem.transaction.enums.PaymentMethod;
 import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Data;
 
 import java.time.LocalDateTime;
 
 @Data
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class PaymentTransactionResponse {
     private Long id;
     private String receiptNumber;
@@ -42,9 +44,9 @@ public class PaymentTransactionResponse {
     private String studentName;
     private String studentGrade;
 
-    // NEW: Student fee information
+    // Student fee information
     private Double studentPendingAmount;
-    private Student.FeeStatus studentFeeStatus; // Import the FeeStatus enum from Student
+    private Student.FeeStatus studentFeeStatus;
 
     // Bank transaction reference
     private Long bankTransactionId;
@@ -54,6 +56,10 @@ public class PaymentTransactionResponse {
     private Double studentTotalFee;
     private Double studentPaidAmount;
     private Double studentPaymentPercentage;
+
+    // ========== ADDED: Term Assignment Fields ==========
+    private Boolean hasTermAssignments;
+    private Integer termAssignmentCount;
 
     // Getters and setters
 

@@ -64,6 +64,10 @@ public class BankTransactionResponse {
     private Double studentPaidAmount;
     private Double studentPaymentPercentage;
 
+    // ========== ADDED: Term Assignment Fields ==========
+    private Boolean hasTermAssignments;
+    private Integer termAssignmentCount;
+
     public void setStudentFeeStatus(Student.FeeStatus feeStatus) {
         this.studentFeeStatus = feeStatus;
     }

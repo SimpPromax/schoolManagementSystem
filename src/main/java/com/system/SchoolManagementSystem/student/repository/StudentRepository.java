@@ -3,12 +3,15 @@ package com.system.SchoolManagementSystem.student.repository;
 import com.system.SchoolManagementSystem.student.dto.StudentFeeSummaryDTO;
 import com.system.SchoolManagementSystem.student.dto.GradeStatisticsDTO;
 import com.system.SchoolManagementSystem.student.entity.Student;
+import com.system.SchoolManagementSystem.termmanagement.entity.StudentTermAssignment;
+import com.system.SchoolManagementSystem.termmanagement.entity.TermFeeItem;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+
 
 import java.time.LocalDate;
 import java.util.List;
@@ -225,6 +228,14 @@ public interface StudentRepository extends JpaRepository<Student, Long>, JpaSpec
     // FIXED: Changed s.isDeleted to s.deleted
     @Query("SELECT s FROM Student s JOIN s.termAssignments ta WHERE ta.academicTerm.id = :termId AND s.deleted = false")
     List<Student> findStudentsByTermId(@Param("termId") Long termId);
+    // ========== NEW METHOD FOR TERM ASSIGNMENTS WITH FEE ITEMS ==========
+
+    @Query("SELECT s FROM Student s " +
+            "LEFT JOIN FETCH s.termAssignments ta " +
+            "LEFT JOIN FETCH ta.feeItems fi " +
+            "LEFT JOIN FETCH ta.academicTerm at " +
+            "WHERE s.id = :studentId")
+    Optional<Student> findByIdWithTermAssignmentsAndFeeItems(@Param("studentId") Long studentId);
 
     // ========== NEW METHODS FOR SOFT DELETE ==========
 

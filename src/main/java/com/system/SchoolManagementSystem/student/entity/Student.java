@@ -9,9 +9,8 @@ import org.hibernate.annotations.Where;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.HashSet;
-import java.util.Optional;
-import java.util.Set;
+import java.util.*;
+import java.util.stream.Collectors;
 
 @Entity
 @Table(name = "students")
@@ -423,6 +422,98 @@ public class Student {
      */
     public void updateFeeSummary() {
         calculateFeeDetails();
+    }
+
+    // ========== NEW HELPER METHODS FOR TERM ASSIGNMENTS ==========
+
+    /**
+     * Check if student has any term assignments
+     * @return true if student has term assignments, false otherwise
+     */
+    @Transient
+    public Boolean getHasTermAssignments() {
+        return this.termAssignments != null && !this.termAssignments.isEmpty();
+    }
+
+    /**
+     * Get the count of term assignments for this student
+     * @return number of term assignments
+     */
+    @Transient
+    public Integer getTermAssignmentCount() {
+        return this.termAssignments != null ? this.termAssignments.size() : 0;
+    }
+
+    /**
+     * Get active term assignments (excluding cancelled/waived)
+     * @return count of active term assignments
+     */
+    @Transient
+    public Integer getActiveTermAssignmentCount() {
+        if (this.termAssignments == null) return 0;
+
+        return (int) this.termAssignments.stream()
+                .filter(ta -> ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.CANCELLED &&
+                        ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.WAIVED)
+                .count();
+    }
+
+    /**
+     * Get term assignments that are pending payment
+     * @return count of term assignments with pending/partial/overdue status
+     */
+    @Transient
+    public Integer getPendingTermAssignmentCount() {
+        if (this.termAssignments == null) return 0;
+
+        return (int) this.termAssignments.stream()
+                .filter(ta -> ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.PENDING ||
+                        ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.PARTIAL ||
+                        ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.OVERDUE)
+                .count();
+    }
+
+    /**
+     * Check if student has current term assignment
+     * @return true if student has current term assignment
+     */
+    @Transient
+    public Boolean getHasCurrentTermAssignment() {
+        return getCurrentTermAssignment().isPresent();
+    }
+
+    /**
+     * Get total pending amount across all term assignments
+     */
+    @Transient
+    public Double getTotalPendingFromAssignments() {
+        if (this.termAssignments == null) return 0.0;
+
+        return this.termAssignments.stream()
+                .filter(ta -> ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.CANCELLED &&
+                        ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.WAIVED)
+                .mapToDouble(StudentTermAssignment::getPendingAmount)
+                .sum();
+    }
+
+    /**
+     * Get overdue term assignments
+     */
+    @Transient
+    public List<StudentTermAssignment> getOverdueTermAssignments() {
+        if (this.termAssignments == null) return Collections.emptyList();
+
+        return this.termAssignments.stream()
+                .filter(ta -> ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.OVERDUE)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Check if student has overdue term assignments
+     */
+    @Transient
+    public Boolean getHasOverdueTermAssignments() {
+        return !getOverdueTermAssignments().isEmpty();
     }
 
     // ========== ENUMS ==========

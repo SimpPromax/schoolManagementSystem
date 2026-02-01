@@ -25,10 +25,12 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 @ToString(exclude = {"student", "academicTerm", "studentFeeAssignment", "feeItems"})
+@EqualsAndHashCode(onlyExplicitlyIncluded = true) // Add this
 public class StudentTermAssignment {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @EqualsAndHashCode.Include // Add this
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY)
