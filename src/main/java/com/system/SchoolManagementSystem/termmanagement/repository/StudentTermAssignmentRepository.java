@@ -9,10 +9,12 @@ import org.springframework.stereotype.Repository;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 @Repository
 public interface StudentTermAssignmentRepository extends JpaRepository<StudentTermAssignment, Long> {
 
+    // ========== EXISTING METHODS ==========
     Optional<StudentTermAssignment> findByStudentIdAndAcademicTermId(Long studentId, Long academicTermId);
 
     List<StudentTermAssignment> findByStudentId(Long studentId);
@@ -21,7 +23,6 @@ public interface StudentTermAssignmentRepository extends JpaRepository<StudentTe
 
     List<StudentTermAssignment> findByStudentIdAndTermFeeStatus(Long studentId, StudentTermAssignment.FeeStatus status);
 
-    // FIXED METHOD: Added JOIN to Student entity to access grade field
     @Query("SELECT s FROM StudentTermAssignment s JOIN s.student st WHERE s.academicTerm.id = :termId AND st.grade = :grade")
     List<StudentTermAssignment> findByAcademicTermIdAndStudentGrade(@Param("termId") Long termId,
                                                                     @Param("grade") String grade);
@@ -57,8 +58,6 @@ public interface StudentTermAssignmentRepository extends JpaRepository<StudentTe
 
     @Query("SELECT s FROM StudentTermAssignment s WHERE s.student.id = :studentId ORDER BY s.academicTerm.startDate DESC")
     List<StudentTermAssignment> findByStudentIdOrderByTermDateDesc(@Param("studentId") Long studentId);
-
-    // Additional methods for improved functionality
 
     @Query("SELECT s FROM StudentTermAssignment s WHERE s.academicTerm.id = :termId AND s.termFeeStatus = 'PAID'")
     List<StudentTermAssignment> findPaidAssignmentsForTerm(@Param("termId") Long termId);
@@ -98,4 +97,72 @@ public interface StudentTermAssignmentRepository extends JpaRepository<StudentTe
 
     @Query("SELECT s FROM StudentTermAssignment s WHERE s.student.grade = :grade AND s.academicTerm.isCurrent = true")
     List<StudentTermAssignment> findCurrentTermAssignmentsByGrade(@Param("grade") String grade);
+
+    // ========== NEW BATCH QUERY METHODS ==========
+
+    /**
+     * Check if a student has any term assignments (single student)
+     */
+    @Query("SELECT COUNT(ta) > 0 FROM StudentTermAssignment ta WHERE ta.student.id = :studentId")
+    boolean hasTermAssignments(@Param("studentId") Long studentId);
+
+    /**
+     * Count term assignments for a student (single student)
+     */
+    @Query("SELECT COUNT(ta) FROM StudentTermAssignment ta WHERE ta.student.id = :studentId")
+    Integer countTermAssignments(@Param("studentId") Long studentId);
+
+    /**
+     * Batch check for multiple students - returns student IDs that have term assignments
+     */
+    @Query("SELECT ta.student.id FROM StudentTermAssignment ta " +
+            "WHERE ta.student.id IN :studentIds " +
+            "GROUP BY ta.student.id " +
+            "HAVING COUNT(ta) > 0")
+    List<Long> findStudentsWithTermAssignments(@Param("studentIds") Set<Long> studentIds);
+
+    /**
+     * Batch count term assignments for multiple students
+     */
+    @Query("SELECT ta.student.id as studentId, COUNT(ta) as assignmentCount " +
+            "FROM StudentTermAssignment ta " +
+            "WHERE ta.student.id IN :studentIds " +
+            "GROUP BY ta.student.id")
+    List<Object[]> batchCountTermAssignments(@Param("studentIds") Set<Long> studentIds);
+
+    /**
+     * Combined batch query - returns studentId, hasAssignments, assignmentCount
+     */
+    @Query("SELECT ta.student.id as studentId, " +
+            "CASE WHEN COUNT(ta) > 0 THEN true ELSE false END as hasAssignments, " +
+            "COUNT(ta) as assignmentCount " +
+            "FROM StudentTermAssignment ta " +
+            "WHERE ta.student.id IN :studentIds " +
+            "GROUP BY ta.student.id")
+    List<Object[]> batchGetTermAssignmentInfo(@Param("studentIds") Set<Long> studentIds);
+
+    /**
+     * Batch check for active term assignments (excluding cancelled/waived)
+     */
+    @Query("SELECT ta.student.id as studentId, " +
+            "CASE WHEN COUNT(ta) > 0 THEN true ELSE false END as hasActiveAssignments, " +
+            "COUNT(ta) as activeAssignmentCount " +
+            "FROM StudentTermAssignment ta " +
+            "WHERE ta.student.id IN :studentIds " +
+            "AND ta.termFeeStatus NOT IN ('CANCELLED', 'WAIVED') " +
+            "GROUP BY ta.student.id")
+    List<Object[]> batchGetActiveTermAssignmentInfo(@Param("studentIds") Set<Long> studentIds);
+
+    /**
+     * Batch check for pending/overdue term assignments
+     */
+    @Query("SELECT ta.student.id as studentId, " +
+            "CASE WHEN COUNT(ta) > 0 THEN true ELSE false END as hasPendingAssignments, " +
+            "COUNT(ta) as pendingAssignmentCount, " +
+            "SUM(ta.pendingAmount) as totalPendingAmount " +
+            "FROM StudentTermAssignment ta " +
+            "WHERE ta.student.id IN :studentIds " +
+            "AND ta.termFeeStatus IN ('PENDING', 'PARTIAL', 'OVERDUE') " +
+            "GROUP BY ta.student.id")
+    List<Object[]> batchGetPendingTermAssignmentInfo(@Param("studentIds") Set<Long> studentIds);
 }

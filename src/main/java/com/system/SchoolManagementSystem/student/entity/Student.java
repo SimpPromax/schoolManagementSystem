@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.system.SchoolManagementSystem.termmanagement.entity.StudentTermAssignment;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.Hibernate;
 import org.hibernate.annotations.SQLDelete;
 import org.hibernate.annotations.Where;
 
@@ -11,6 +12,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Entity
 @Table(name = "students")
@@ -233,38 +235,50 @@ public class Student {
      * Calculate fee details from term assignments
      */
     private void calculateFeeDetails() {
-        // Calculate totals from term assignments
-        double totalTermFee = getTotalFeeAmount();
-        double totalPaid = getTotalPaidAmount();
-        double totalPending = getTotalPendingAmount();
+        try {
+            // Only calculate if termAssignments is initialized
+            if (Hibernate.isInitialized(this.termAssignments) && this.termAssignments != null) {
+                // Calculate totals from term assignments
+                double totalTermFee = getTotalFeeAmount();
+                double totalPaid = getTotalPaidAmount();
+                double totalPending = getTotalPendingAmount();
 
-        // Calculate fee breakdown from term assignments
-        double tuitionTotal = getTuitionFeeTotal();
-        double admissionTotal = getAdmissionFeeTotal();
-        double examinationTotal = getExaminationFeeTotal();
-        double otherTotal = getOtherFeesTotal();
+                // Calculate fee breakdown from term assignments
+                double tuitionTotal = getTuitionFeeTotal();
+                double admissionTotal = getAdmissionFeeTotal();
+                double examinationTotal = getExaminationFeeTotal();
+                double otherTotal = getOtherFeesTotal();
 
-        // Update fields
-        this.totalFee = totalTermFee;
-        this.paidAmount = totalPaid;
-        this.pendingAmount = totalPending;
-        this.tuitionFee = tuitionTotal;
-        this.admissionFee = admissionTotal;
-        this.examinationFee = examinationTotal;
-        this.otherFees = otherTotal;
+                // Update fields
+                this.totalFee = totalTermFee;
+                this.paidAmount = totalPaid;
+                this.pendingAmount = totalPending;
+                this.tuitionFee = tuitionTotal;
+                this.admissionFee = admissionTotal;
+                this.examinationFee = examinationTotal;
+                this.otherFees = otherTotal;
 
-        // Update fee status
-        if (totalPaid >= totalTermFee) {
-            this.feeStatus = FeeStatus.PAID;
-        } else if (totalPaid > 0) {
-            this.feeStatus = FeeStatus.PARTIAL;
-        } else {
-            this.feeStatus = FeeStatus.PENDING;
+                // Update fee status
+                if (totalPaid >= totalTermFee) {
+                    this.feeStatus = FeeStatus.PAID;
+                } else if (totalPaid > 0) {
+                    this.feeStatus = FeeStatus.PARTIAL;
+                } else {
+                    this.feeStatus = FeeStatus.PENDING;
+                }
+
+                // Update fee due date (earliest pending due date)
+                Optional<LocalDate> earliestDueDate = getEarliestPendingDueDate();
+                earliestDueDate.ifPresent(date -> this.feeDueDate = date);
+            } else {
+                // If termAssignments not initialized, keep existing values or set defaults
+                this.pendingAmount = this.totalFee != null ?
+                        Math.max(0, this.totalFee - (this.paidAmount != null ? this.paidAmount : 0.0)) : 0.0;
+            }
+        } catch (Exception e) {
+            // Log error but don't throw - we can still function without term assignments
+            System.err.println("Error calculating fee details: " + e.getMessage());
         }
-
-        // Update fee due date (earliest pending due date)
-        Optional<LocalDate> earliestDueDate = getEarliestPendingDueDate();
-        earliestDueDate.ifPresent(date -> this.feeDueDate = date);
     }
 
     // ========== HELPER METHODS FOR TERM FEE CALCULATION ==========
@@ -273,6 +287,9 @@ public class Student {
      * Get total fee amount across all terms
      */
     public Double getTotalFeeAmount() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return 0.0;
+        }
         return termAssignments.stream()
                 .mapToDouble(StudentTermAssignment::getTotalTermFee)
                 .sum();
@@ -282,6 +299,9 @@ public class Student {
      * Get total paid amount across all terms
      */
     public Double getTotalPaidAmount() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return 0.0;
+        }
         return termAssignments.stream()
                 .mapToDouble(StudentTermAssignment::getPaidAmount)
                 .sum();
@@ -291,6 +311,9 @@ public class Student {
      * Get total pending amount across all terms
      */
     public Double getTotalPendingAmount() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return 0.0;
+        }
         return termAssignments.stream()
                 .mapToDouble(StudentTermAssignment::getPendingAmount)
                 .sum();
@@ -300,8 +323,16 @@ public class Student {
      * Get tuition fee total across all terms
      */
     public Double getTuitionFeeTotal() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return 0.0;
+        }
         return termAssignments.stream()
-                .flatMap(ta -> ta.getFeeItems().stream())
+                .flatMap(ta -> {
+                    if (Hibernate.isInitialized(ta.getFeeItems())) {
+                        return ta.getFeeItems().stream();
+                    }
+                    return Stream.empty();
+                })
                 .filter(item -> item.getFeeType() != null &&
                         item.getFeeType().name().equals("TUITION"))
                 .mapToDouble(item -> item.getAmount())
@@ -312,8 +343,16 @@ public class Student {
      * Get admission fee total across all terms
      */
     public Double getAdmissionFeeTotal() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return 0.0;
+        }
         return termAssignments.stream()
-                .flatMap(ta -> ta.getFeeItems().stream())
+                .flatMap(ta -> {
+                    if (Hibernate.isInitialized(ta.getFeeItems())) {
+                        return ta.getFeeItems().stream();
+                    }
+                    return Stream.empty();
+                })
                 .filter(item -> item.getFeeType() != null &&
                         item.getFeeType().name().equals("ADMISSION"))
                 .mapToDouble(item -> item.getAmount())
@@ -324,8 +363,16 @@ public class Student {
      * Get examination fee total across all terms
      */
     public Double getExaminationFeeTotal() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return 0.0;
+        }
         return termAssignments.stream()
-                .flatMap(ta -> ta.getFeeItems().stream())
+                .flatMap(ta -> {
+                    if (Hibernate.isInitialized(ta.getFeeItems())) {
+                        return ta.getFeeItems().stream();
+                    }
+                    return Stream.empty();
+                })
                 .filter(item -> item.getFeeType() != null &&
                         item.getFeeType().name().equals("EXAMINATION"))
                 .mapToDouble(item -> item.getAmount())
@@ -336,8 +383,16 @@ public class Student {
      * Get other fees total across all terms
      */
     public Double getOtherFeesTotal() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return 0.0;
+        }
         return termAssignments.stream()
-                .flatMap(ta -> ta.getFeeItems().stream())
+                .flatMap(ta -> {
+                    if (Hibernate.isInitialized(ta.getFeeItems())) {
+                        return ta.getFeeItems().stream();
+                    }
+                    return Stream.empty();
+                })
                 .filter(item -> item.getFeeType() != null &&
                         (item.getFeeType().name().equals("OTHER") ||
                                 item.getFeeType().name().equals("LIBRARY") ||
@@ -354,6 +409,9 @@ public class Student {
      * Get earliest pending due date from all term assignments
      */
     public Optional<LocalDate> getEarliestPendingDueDate() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return Optional.empty();
+        }
         return termAssignments.stream()
                 .filter(ta -> ta.getPendingAmount() > 0)
                 .map(StudentTermAssignment::getDueDate)
@@ -365,6 +423,9 @@ public class Student {
      * Get current term assignment
      */
     public Optional<StudentTermAssignment> getCurrentTermAssignment() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return Optional.empty();
+        }
         return termAssignments.stream()
                 .filter(ta -> ta.getAcademicTerm() != null &&
                         ta.getAcademicTerm().getIsCurrent())
@@ -375,6 +436,9 @@ public class Student {
      * Check if student has overdue fees
      */
     public boolean hasOverdueFees() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return false;
+        }
         return termAssignments.stream()
                 .anyMatch(ta -> ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.OVERDUE);
     }
@@ -383,6 +447,9 @@ public class Student {
      * Get overdue amount
      */
     public Double getOverdueAmount() {
+        if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+            return 0.0;
+        }
         return termAssignments.stream()
                 .filter(ta -> ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.OVERDUE)
                 .mapToDouble(StudentTermAssignment::getPendingAmount)
@@ -403,18 +470,22 @@ public class Student {
      * Add term assignment
      */
     public void addTermAssignment(StudentTermAssignment assignment) {
-        termAssignments.add(assignment);
-        assignment.setStudent(this);
-        calculateFeeDetails();
+        if (Hibernate.isInitialized(this.termAssignments) && this.termAssignments != null) {
+            termAssignments.add(assignment);
+            assignment.setStudent(this);
+            calculateFeeDetails();
+        }
     }
 
     /**
      * Remove term assignment
      */
     public void removeTermAssignment(StudentTermAssignment assignment) {
-        termAssignments.remove(assignment);
-        assignment.setStudent(null);
-        calculateFeeDetails();
+        if (Hibernate.isInitialized(this.termAssignments) && this.termAssignments != null) {
+            termAssignments.remove(assignment);
+            assignment.setStudent(null);
+            calculateFeeDetails();
+        }
     }
 
     /**
@@ -432,7 +503,19 @@ public class Student {
      */
     @Transient
     public Boolean getHasTermAssignments() {
-        return this.termAssignments != null && !this.termAssignments.isEmpty();
+        try {
+            // Check if the collection proxy is initialized
+            if (!Hibernate.isInitialized(this.termAssignments)) {
+                // Collection is not initialized - return null instead of trying to initialize
+                return null;
+            }
+            // Now it's safe to check
+            return this.termAssignments != null && !this.termAssignments.isEmpty();
+        } catch (Exception e) {
+            // Catch any exception and return null
+            System.err.println("Error in getHasTermAssignments: " + e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -441,7 +524,19 @@ public class Student {
      */
     @Transient
     public Integer getTermAssignmentCount() {
-        return this.termAssignments != null ? this.termAssignments.size() : 0;
+        try {
+            // Check if the collection proxy is initialized
+            if (!Hibernate.isInitialized(this.termAssignments)) {
+                // Collection is not initialized - return null instead of trying to initialize
+                return null;
+            }
+            // Now it's safe to check size
+            return this.termAssignments != null ? this.termAssignments.size() : 0;
+        } catch (Exception e) {
+            // Catch any exception and return 0
+            System.err.println("Error in getTermAssignmentCount: " + e.getMessage());
+            return 0;
+        }
     }
 
     /**
@@ -450,12 +545,18 @@ public class Student {
      */
     @Transient
     public Integer getActiveTermAssignmentCount() {
-        if (this.termAssignments == null) return 0;
+        try {
+            if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+                return 0;
+            }
 
-        return (int) this.termAssignments.stream()
-                .filter(ta -> ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.CANCELLED &&
-                        ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.WAIVED)
-                .count();
+            return (int) this.termAssignments.stream()
+                    .filter(ta -> ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.CANCELLED &&
+                            ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.WAIVED)
+                    .count();
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     /**
@@ -464,13 +565,19 @@ public class Student {
      */
     @Transient
     public Integer getPendingTermAssignmentCount() {
-        if (this.termAssignments == null) return 0;
+        try {
+            if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+                return 0;
+            }
 
-        return (int) this.termAssignments.stream()
-                .filter(ta -> ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.PENDING ||
-                        ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.PARTIAL ||
-                        ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.OVERDUE)
-                .count();
+            return (int) this.termAssignments.stream()
+                    .filter(ta -> ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.PENDING ||
+                            ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.PARTIAL ||
+                            ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.OVERDUE)
+                    .count();
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     /**
@@ -487,13 +594,19 @@ public class Student {
      */
     @Transient
     public Double getTotalPendingFromAssignments() {
-        if (this.termAssignments == null) return 0.0;
+        try {
+            if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+                return 0.0;
+            }
 
-        return this.termAssignments.stream()
-                .filter(ta -> ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.CANCELLED &&
-                        ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.WAIVED)
-                .mapToDouble(StudentTermAssignment::getPendingAmount)
-                .sum();
+            return this.termAssignments.stream()
+                    .filter(ta -> ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.CANCELLED &&
+                            ta.getTermFeeStatus() != StudentTermAssignment.FeeStatus.WAIVED)
+                    .mapToDouble(StudentTermAssignment::getPendingAmount)
+                    .sum();
+        } catch (Exception e) {
+            return 0.0;
+        }
     }
 
     /**
@@ -501,11 +614,17 @@ public class Student {
      */
     @Transient
     public List<StudentTermAssignment> getOverdueTermAssignments() {
-        if (this.termAssignments == null) return Collections.emptyList();
+        try {
+            if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
+                return Collections.emptyList();
+            }
 
-        return this.termAssignments.stream()
-                .filter(ta -> ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.OVERDUE)
-                .collect(Collectors.toList());
+            return this.termAssignments.stream()
+                    .filter(ta -> ta.getTermFeeStatus() == StudentTermAssignment.FeeStatus.OVERDUE)
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            return Collections.emptyList();
+        }
     }
 
     /**

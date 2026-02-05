@@ -52,10 +52,10 @@ public class TransactionService {
     private final SmsLogRepository smsLogRepository;
     private final StudentRepository studentRepository;
     private final UserRepository userRepository;
+    private final StudentTermAssignmentRepository studentTermAssignmentRepository; // ADDED
 
     // ========== NEW TERM MANAGEMENT INTEGRATION ==========
     private final TermFeeService termFeeService;
-    private final StudentTermAssignmentRepository studentTermAssignmentRepository;
     private final TermFeeItemRepository termFeeItemRepository;
 
     // ========== UTILITIES ==========
@@ -214,9 +214,58 @@ public class TransactionService {
             log.info("✅ Synchronous import completed: {} transactions, {} auto-matched",
                     savedTransactions.size(), autoMatchedCount);
 
-            // Convert to response DTOs
+            // ========== BATCH QUERY TERM ASSIGNMENTS ==========
+            Map<Long, Boolean> hasAssignmentsMap = new HashMap<>();
+            Map<Long, Integer> assignmentCountMap = new HashMap<>();
+
+            // Collect unique student IDs
+            Set<Long> studentIds = savedTransactions.stream()
+                    .filter(bt -> bt.getStudent() != null)
+                    .map(bt -> bt.getStudent().getId())
+                    .collect(Collectors.toSet());
+
+            if (!studentIds.isEmpty()) {
+                log.info("🔍 Batch querying term assignments for {} students", studentIds.size());
+
+                try {
+                    // Use batch query - single database call
+                    List<Object[]> batchResults = studentTermAssignmentRepository
+                            .batchGetTermAssignmentInfo(studentIds);
+
+                    // Process results
+                    for (Object[] result : batchResults) {
+                        Long studentId = ((Number) result[0]).longValue();
+                        Boolean hasAssignments = (Boolean) result[1];
+                        Integer assignmentCount = ((Number) result[2]).intValue();
+
+                        hasAssignmentsMap.put(studentId, hasAssignments != null ? hasAssignments : false);
+                        assignmentCountMap.put(studentId, assignmentCount != null ? assignmentCount : 0);
+                    }
+
+                    // For students not in the results (no term assignments)
+                    for (Long studentId : studentIds) {
+                        if (!hasAssignmentsMap.containsKey(studentId)) {
+                            hasAssignmentsMap.put(studentId, false);
+                            assignmentCountMap.put(studentId, 0);
+                        }
+                    }
+
+                    log.info("✅ Retrieved term assignment info for {} students", hasAssignmentsMap.size());
+
+                } catch (Exception e) {
+                    log.error("❌ Error batch querying term assignments: {}", e.getMessage());
+                    // Set defaults for all students
+                    for (Long studentId : studentIds) {
+                        hasAssignmentsMap.put(studentId, false);
+                        assignmentCountMap.put(studentId, 0);
+                    }
+                }
+            }
+
+            // Convert to response DTOs with pre-fetched data
             return savedTransactions.stream()
-                    .map(this::convertToBankTransactionResponse)
+                    .map(transaction -> convertToBankTransactionResponseWithTermData(
+                            transaction, hasAssignmentsMap, assignmentCountMap))
                     .collect(Collectors.toList());
 
         } catch (Exception e) {
@@ -1414,7 +1463,11 @@ public class TransactionService {
 
     // ========== CONVERSION METHODS ==========
 
-    private BankTransactionResponse convertToBankTransactionResponse(BankTransaction transaction) {
+    private BankTransactionResponse convertToBankTransactionResponseWithTermData(
+            BankTransaction transaction,
+            Map<Long, Boolean> hasAssignmentsMap,
+            Map<Long, Integer> assignmentCountMap) {
+
         BankTransactionResponse response = new BankTransactionResponse();
         response.setId(transaction.getId());
         response.setBankReference(transaction.getBankReference());
@@ -1444,27 +1497,6 @@ public class TransactionService {
         if (transaction.getStudent() != null) {
             Student student = transaction.getStudent();
 
-            // ========== ADD DEBUG LOGGING ==========
-            System.out.println("DEBUG ==========================================");
-            System.out.println("DEBUG Student ID: " + student.getId());
-            System.out.println("DEBUG Student Name: " + student.getFullName());
-            System.out.println("DEBUG termAssignments reference: " + student.getTermAssignments());
-            System.out.println("DEBUG termAssignments is null? " + (student.getTermAssignments() == null));
-
-            if (student.getTermAssignments() != null) {
-                System.out.println("DEBUG termAssignments size: " + student.getTermAssignments().size());
-                System.out.println("DEBUG termAssignments content: " + student.getTermAssignments());
-            }
-
-            System.out.println("DEBUG Calling getHasTermAssignments()...");
-            Boolean hasAssignments = student.getHasTermAssignments();
-            System.out.println("DEBUG getHasTermAssignments() result: " + hasAssignments);
-
-            System.out.println("DEBUG Calling getTermAssignmentCount()...");
-            Integer count = student.getTermAssignmentCount();
-            System.out.println("DEBUG getTermAssignmentCount() result: " + count);
-            System.out.println("DEBUG ==========================================");
-            // ========================================
             response.setStudentId(student.getId());
             response.setStudentName(student.getFullName());
             response.setStudentGrade(student.getGrade());
@@ -1474,10 +1506,14 @@ public class TransactionService {
             response.setStudentTotalFee(student.getTotalFee());
             response.setStudentPaidAmount(student.getPaidAmount());
 
-            // ========== USING HELPER METHODS ==========
-            response.setHasTermAssignments(student.getHasTermAssignments());
-            response.setTermAssignmentCount(student.getTermAssignmentCount());
-            // ==========================================
+            // ========== USE PRE-FETCHED TERM ASSIGNMENT DATA ==========
+            Long studentId = student.getId();
+            Boolean hasAssignments = hasAssignmentsMap.get(studentId);
+            Integer assignmentCount = assignmentCountMap.get(studentId);
+
+            response.setHasTermAssignments(hasAssignments != null ? hasAssignments : false);
+            response.setTermAssignmentCount(assignmentCount != null ? assignmentCount : 0);
+            // ==========================================================
 
             if (student.getPendingAmount() != null && student.getTotalFee() != null &&
                     student.getTotalFee() > 0) {
@@ -1488,6 +1524,10 @@ public class TransactionService {
         }
 
         return response;
+    }
+
+    private BankTransactionResponse convertToBankTransactionResponse(BankTransaction transaction) {
+        return convertToBankTransactionResponseWithTermData(transaction, new HashMap<>(), new HashMap<>());
     }
 
     private PaymentTransactionResponse convertToPaymentTransactionResponse(PaymentTransaction transaction) {
@@ -1520,10 +1560,21 @@ public class TransactionService {
             response.setStudentTotalFee(student.getTotalFee());
             response.setStudentPaidAmount(student.getPaidAmount());
 
-            // ========== USING HELPER METHODS ==========
-            response.setHasTermAssignments(student.getHasTermAssignments());
-            response.setTermAssignmentCount(student.getTermAssignmentCount());
-            // ==========================================
+            // ========== QUERY TERM ASSIGNMENTS FOR PAYMENT TRANSACTIONS ==========
+            try {
+                boolean hasAssignments = studentTermAssignmentRepository.hasTermAssignments(student.getId());
+                Integer assignmentCount = studentTermAssignmentRepository.countTermAssignments(student.getId());
+
+                response.setHasTermAssignments(hasAssignments);
+                response.setTermAssignmentCount(assignmentCount != null ? assignmentCount : 0);
+
+            } catch (Exception e) {
+                log.warn("Error querying term assignments for student {}: {}",
+                        student.getId(), e.getMessage());
+                response.setHasTermAssignments(false);
+                response.setTermAssignmentCount(0);
+            }
+            // ==========================================================
 
             if (student.getPendingAmount() != null && student.getTotalFee() != null &&
                     student.getTotalFee() > 0) {
