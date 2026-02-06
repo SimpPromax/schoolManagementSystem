@@ -97,6 +97,9 @@ public class BankTransaction {
     @Column(name = "sms_id")
     private String smsId;
 
+    @Column(length = 1000)
+    private String notes;
+
     @OneToOne(mappedBy = "bankTransaction", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private PaymentTransaction paymentTransaction;
 

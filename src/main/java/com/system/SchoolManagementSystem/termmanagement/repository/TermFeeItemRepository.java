@@ -8,6 +8,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Set;
 
 @Repository
 public interface TermFeeItemRepository extends JpaRepository<TermFeeItem, Long> {
@@ -50,4 +51,91 @@ public interface TermFeeItemRepository extends JpaRepository<TermFeeItem, Long> 
 
     @Query("SELECT t FROM TermFeeItem t WHERE t.studentTermAssignment.student.id = :studentId AND t.status = 'OVERDUE' ORDER BY t.dueDate ASC")
     List<TermFeeItem> findOverdueItemsForStudent(@Param("studentId") Long studentId);
+
+    // NEW METHODS ADDED FOR OPTIMIZATION
+
+    /**
+     * Find unpaid items by student with pending amount calculation
+     */
+    @Query("SELECT t FROM TermFeeItem t WHERE t.studentTermAssignment.student.id = :studentId " +
+            "AND t.status IN ('PENDING', 'PARTIAL', 'OVERDUE') " +
+            "ORDER BY t.dueDate ASC")
+    List<TermFeeItem> findUnpaidItemsForStudent(@Param("studentId") Long studentId);
+
+    /**
+     * Get total pending amount for a student across all terms
+     */
+    @Query("SELECT COALESCE(SUM(CASE " +
+            "WHEN t.status = 'PARTIAL' THEN t.amount - t.paidAmount " +
+            "WHEN t.status IN ('PENDING', 'OVERDUE') THEN t.amount " +
+            "ELSE 0 END), 0) " +
+            "FROM TermFeeItem t WHERE t.studentTermAssignment.student.id = :studentId " +
+            "AND t.status IN ('PENDING', 'PARTIAL', 'OVERDUE')")
+    Double getTotalPendingAmountForStudent(@Param("studentId") Long studentId);
+
+    /**
+     * Get pending amount breakdown by term for a student
+     */
+    @Query("SELECT t.studentTermAssignment.academicTerm.id, " +
+            "COALESCE(SUM(CASE " +
+            "WHEN t.status = 'PARTIAL' THEN t.amount - t.paidAmount " +
+            "WHEN t.status IN ('PENDING', 'OVERDUE') THEN t.amount " +
+            "ELSE 0 END), 0) as pendingAmount " +
+            "FROM TermFeeItem t WHERE t.studentTermAssignment.student.id = :studentId " +
+            "AND t.status IN ('PENDING', 'PARTIAL', 'OVERDUE') " +
+            "GROUP BY t.studentTermAssignment.academicTerm.id")
+    List<Object[]> getPendingAmountByTermForStudent(@Param("studentId") Long studentId);
+
+    /**
+     * Find fee items by IDs with student validation
+     */
+    @Query("SELECT t FROM TermFeeItem t WHERE t.id IN :itemIds " +
+            "AND t.studentTermAssignment.student.id = :studentId " +
+            "AND t.status IN ('PENDING', 'PARTIAL', 'OVERDUE')")
+    List<TermFeeItem> findValidUnpaidItemsForStudent(@Param("studentId") Long studentId,
+                                                     @Param("itemIds") Set<Long> itemIds);
+
+    /**
+     * Batch get unpaid items for multiple students
+     */
+    @Query("SELECT t FROM TermFeeItem t WHERE t.studentTermAssignment.student.id IN :studentIds " +
+            "AND t.status IN ('PENDING', 'PARTIAL', 'OVERDUE')")
+    List<TermFeeItem> findUnpaidItemsForStudents(@Param("studentIds") Set<Long> studentIds);
+
+    /**
+     * Get fee item counts by status for a student
+     */
+    @Query("SELECT t.status, COUNT(t) as count FROM TermFeeItem t " +
+            "WHERE t.studentTermAssignment.student.id = :studentId " +
+            "GROUP BY t.status")
+    List<Object[]> getFeeItemCountsByStatus(@Param("studentId") Long studentId);
+
+    /**
+     * Find overdue items with calculated overdue days
+     */
+    @Query("SELECT t FROM TermFeeItem t WHERE t.studentTermAssignment.student.id = :studentId " +
+            "AND t.status = 'OVERDUE' " +
+            "AND t.dueDate < CURRENT_DATE " +
+            "ORDER BY t.dueDate ASC")
+    List<TermFeeItem> findActiveOverdueItemsForStudent(@Param("studentId") Long studentId);
+
+
+
+    /**
+     * Find fee items that are eligible for auto-payment (based on due date and sequence)
+     */
+    @Query("SELECT t FROM TermFeeItem t WHERE t.studentTermAssignment.student.id = :studentId " +
+            "AND t.status IN ('PENDING', 'OVERDUE') " +
+            "AND (t.dueDate <= CURRENT_DATE OR t.sequenceOrder <= :maxSequence) " +
+            "ORDER BY t.sequenceOrder ASC, t.dueDate ASC")
+    List<TermFeeItem> findEligibleItemsForAutoPayment(@Param("studentId") Long studentId,
+                                                      @Param("maxSequence") Integer maxSequence);
+
+    /**
+     * Check if student has any unpaid fee items
+     */
+    @Query("SELECT CASE WHEN COUNT(t) > 0 THEN true ELSE false END " +
+            "FROM TermFeeItem t WHERE t.studentTermAssignment.student.id = :studentId " +
+            "AND t.status IN ('PENDING', 'PARTIAL', 'OVERDUE')")
+    Boolean hasUnpaidItems(@Param("studentId") Long studentId);
 }

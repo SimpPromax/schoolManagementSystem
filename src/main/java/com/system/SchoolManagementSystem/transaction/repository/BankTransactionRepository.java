@@ -24,6 +24,9 @@ public interface BankTransactionRepository extends JpaRepository<BankTransaction
 
     List<BankTransaction> findByStudentId(Long studentId);
 
+    // ========== NEW METHOD ADDED ==========
+    List<BankTransaction> findByStudentIdAndStatus(Long studentId, TransactionStatus status);
+
     List<BankTransaction> findByTransactionDateBetween(LocalDate startDate, LocalDate endDate);
 
     @Query("SELECT COUNT(bt) FROM BankTransaction bt WHERE bt.status = :status")
@@ -41,7 +44,6 @@ public interface BankTransactionRepository extends JpaRepository<BankTransaction
             "(bt.student IS NOT NULL AND LOWER(bt.student.fullName) LIKE LOWER(CONCAT('%', :search, '%'))))")
     Page<BankTransaction> searchTransactions(@Param("search") String search, Pageable pageable);
 
-
     // New methods for statistics
     @Query("SELECT COUNT(bt) FROM BankTransaction bt WHERE bt.status = :status AND bt.transactionDate >= :startDate")
     Long countByStatusAndDateAfter(@Param("status") TransactionStatus status,
@@ -57,4 +59,34 @@ public interface BankTransactionRepository extends JpaRepository<BankTransaction
     @Query("SELECT bt.status, COUNT(bt) FROM BankTransaction bt WHERE bt.transactionDate BETWEEN :startDate AND :endDate GROUP BY bt.status")
     List<Object[]> countByStatusAndDateRange(@Param("startDate") LocalDate startDate,
                                              @Param("endDate") LocalDate endDate);
+
+    // ========== ADDITIONAL METHODS NEEDED ==========
+
+    @Query("SELECT bt FROM BankTransaction bt WHERE bt.student.id = :studentId AND bt.status = 'MATCHED'")
+    List<BankTransaction> findByStudentIdAndMatched(@Param("studentId") Long studentId);
+
+    @Query("SELECT bt FROM BankTransaction bt WHERE bt.student.id = :studentId AND bt.status = 'VERIFIED'")
+    List<BankTransaction> findByStudentIdAndVerified(@Param("studentId") Long studentId);
+
+    @Query("SELECT COALESCE(SUM(bt.amount), 0) FROM BankTransaction bt WHERE bt.student.id = :studentId AND bt.status = 'VERIFIED'")
+    Double sumVerifiedAmountByStudent(@Param("studentId") Long studentId);
+
+    @Query("SELECT COALESCE(SUM(bt.amount), 0) FROM BankTransaction bt WHERE bt.student.id = :studentId AND bt.status = 'MATCHED'")
+    Double sumMatchedAmountByStudent(@Param("studentId") Long studentId);
+
+    @Query("SELECT COALESCE(SUM(bt.amount), 0) FROM BankTransaction bt WHERE bt.student.id = :studentId")
+    Double sumTotalAmountByStudent(@Param("studentId") Long studentId);
+
+    @Query("SELECT bt FROM BankTransaction bt WHERE bt.status IN ('MATCHED', 'VERIFIED') AND bt.student.id = :studentId")
+    List<BankTransaction> findProcessedTransactionsByStudent(@Param("studentId") Long studentId);
+
+    @Query("SELECT COALESCE(SUM(bt.amount), 0) FROM BankTransaction bt WHERE bt.status IN ('MATCHED', 'VERIFIED')")
+    Double sumProcessedAmount();
+
+    @Query("SELECT COALESCE(SUM(bt.amount), 0) FROM BankTransaction bt WHERE bt.status IN ('MATCHED', 'VERIFIED') AND bt.transactionDate = :date")
+    Double sumProcessedAmountByDate(@Param("date") LocalDate date);
+
+    // Method to get bank transactions for a specific student with any status
+    @Query("SELECT bt FROM BankTransaction bt WHERE bt.student.id = :studentId")
+    List<BankTransaction> findAllByStudentId(@Param("studentId") Long studentId);
 }

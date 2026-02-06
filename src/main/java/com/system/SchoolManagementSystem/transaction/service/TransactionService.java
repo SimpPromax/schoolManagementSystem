@@ -9,6 +9,7 @@ import com.system.SchoolManagementSystem.termmanagement.entity.TermFeeItem;
 import com.system.SchoolManagementSystem.termmanagement.repository.StudentTermAssignmentRepository;
 import com.system.SchoolManagementSystem.termmanagement.repository.TermFeeItemRepository;
 import com.system.SchoolManagementSystem.termmanagement.service.TermFeeService;
+import com.system.SchoolManagementSystem.transaction.validation.TransactionValidationService;
 import com.system.SchoolManagementSystem.transaction.dto.request.*;
 import com.system.SchoolManagementSystem.transaction.dto.response.*;
 import com.system.SchoolManagementSystem.transaction.enums.TransactionStatus;
@@ -70,6 +71,9 @@ public class TransactionService {
 
     // ========== PERFORMANCE MONITORING ==========
     private final Map<String, ImportProgress> importProgressMap = new ConcurrentHashMap<>();
+
+    // ========== VALIDATION SERVICE ==========
+    private final TransactionValidationService transactionValidationService; // ADD THIS
 
     // ========== INITIALIZATION ==========
 
@@ -275,120 +279,90 @@ public class TransactionService {
     }
 
     private List<BankTransaction> autoMatchTransactionsOptimized(List<BankTransaction> transactions) {
-        if (transactions == null || transactions.isEmpty()) {
-            log.info("No transactions to match");
-            return Collections.emptyList();
-        }
-
         log.info("🚀 Starting auto-matching for {} transactions", transactions.size());
-        long startTime = System.currentTimeMillis();
 
-        // ========== CHECK CACHE STATUS ==========
-        if (!studentCacheService.isCacheLoaded()) {
-            log.warn("⚠️ Student cache not loaded! Matching will be limited.");
-            log.info("🔄 StudentCacheService is loading asynchronously...");
+        // Collect student IDs from matched transactions
+        Set<Long> matchedStudentIds = new HashSet<>();
+        Map<Long, List<BankTransaction>> transactionsByStudent = new HashMap<>();
 
-            // Try to check cache content
-            Set<String> names = studentCacheService.getAllNames();
-            log.info("Current cache names: {}", names.size());
+        // First pass: Match students (existing logic)
+        for (BankTransaction transaction : transactions) {
+            Optional<Student> matchedStudent = transactionMatcher.findMatchingStudent(transaction);
 
-            // We can continue without full cache, but matching will be less effective
-        } else {
-            Set<String> names = studentCacheService.getAllNames();
-            log.info("✅ Using StudentCacheService with {} student names", names.size());
+            if (matchedStudent.isPresent()) {
+                Student student = matchedStudent.get();
+                transaction.setStudent(student);
+                transaction.setStatus(TransactionStatus.MATCHED);
 
-            if (!names.isEmpty()) {
-                log.info("Sample cached names:");
-                names.stream().limit(5).forEach(name -> log.info("  - {}", name));
+                matchedStudentIds.add(student.getId());
+                transactionsByStudent.computeIfAbsent(student.getId(), k -> new ArrayList<>())
+                        .add(transaction);
             }
         }
 
-        // ========== TRANSACTION MATCHING USING SINGLE CACHE ==========
-        List<BankTransaction> matchedTransactions = new ArrayList<>(transactions.size());
-        AtomicInteger autoMatchedCount = new AtomicInteger(0);
-        AtomicInteger noMatchCount = new AtomicInteger(0);
+        // ========== CRITICAL: VALIDATE BEFORE PROCESSING ==========
+        if (!matchedStudentIds.isEmpty()) {
+            log.info("🔍 Validating {} matched students before processing", matchedStudentIds.size());
+
+            Map<Long, TransactionValidationService.ValidationResult> validationResults =
+                    transactionValidationService.batchValidateStudents(matchedStudentIds);
+
+            int invalidCount = 0;
+            List<Long> invalidStudentIds = new ArrayList<>();
+
+            for (Map.Entry<Long, TransactionValidationService.ValidationResult> entry :
+                    validationResults.entrySet()) {
+
+                Long studentId = entry.getKey();
+                TransactionValidationService.ValidationResult result = entry.getValue();
+
+                if (!result.isValid()) {
+                    invalidCount++;
+                    invalidStudentIds.add(studentId);
+
+                    // Mark all transactions for this student as invalid
+                    List<BankTransaction> studentTransactions = transactionsByStudent.get(studentId);
+                    if (studentTransactions != null) {
+                        for (BankTransaction txn : studentTransactions) {
+                            txn.setStatus(TransactionStatus.UNVERIFIED);
+                            txn.setStudent(null); // Unlink student
+                            txn.setNotes("VALIDATION FAILED: " + result.getMessage());
+
+                            log.error("❌ Transaction {} rejected for student {}: {}",
+                                    txn.getBankReference(),
+                                    txn.getDescription(),
+                                    result.getMessage());
+                        }
+                    }
+                }
+            }
+
+            if (invalidCount > 0) {
+                log.error("🚫 Rejected transactions for {} students: {}",
+                        invalidCount, invalidStudentIds);
+
+                // Remove invalid students from processing
+                invalidStudentIds.forEach(matchedStudentIds::remove);
+            }
+        }
+        // ========================================================
+
+        // Process only validated transactions
+        List<BankTransaction> validTransactions = new ArrayList<>();
 
         for (BankTransaction transaction : transactions) {
-            try {
-                log.debug("🔍 Matching transaction: '{}' (KES {})",
-                        transaction.getDescription(), transaction.getAmount());
+            if (transaction.getStudent() != null &&
+                    transaction.getStatus() == TransactionStatus.MATCHED &&
+                    matchedStudentIds.contains(transaction.getStudent().getId())) {
 
-                // Use the matcher - it will use the single StudentCacheService
-                Optional<Student> matchedStudent = transactionMatcher.findMatchingStudent(transaction);
-
-                if (matchedStudent.isPresent()) {
-                    Student student = matchedStudent.get();
-
-                    // Double-check: verify name appears in description
-                    String description = transaction.getDescription().toLowerCase();
-                    String studentName = student.getFullName().toLowerCase();
-
-                    boolean nameFound = false;
-
-                    // Check if any part of student name appears in description
-                    String[] nameParts = studentName.split("\\s+");
-                    for (String part : nameParts) {
-                        if (part.length() > 2 && description.contains(part)) {
-                            nameFound = true;
-                            break;
-                        }
-                    }
-
-                    // Also check student ID
-                    if (!nameFound && student.getStudentId() != null) {
-                        String studentId = student.getStudentId().toLowerCase();
-                        if (description.contains(studentId)) {
-                            nameFound = true;
-                            log.debug("📋 Matched by Student ID: {}", studentId);
-                        }
-                    }
-
-                    if (nameFound) {
-                        // ✅ SUCCESS: Found a match!
-                        transaction.setStudent(student);
-                        transaction.setStatus(TransactionStatus.MATCHED);
-                        transaction.setMatchedAt(LocalDateTime.now());
-                        autoMatchedCount.incrementAndGet();
-
-                        log.info("✅ Auto-matched: '{}' → {} (ID: {})",
-                                transaction.getDescription(),
-                                student.getFullName(),
-                                student.getStudentId());
-                    } else {
-                        // Matcher found something but name not in description
-                        log.debug("⚠️ Matcher returned '{}' but name not found in description",
-                                student.getFullName());
-                        noMatchCount.incrementAndGet();
-                    }
-                } else {
-                    // No match found
-                    log.debug("❌ No student match found for: '{}'",
-                            transaction.getDescription());
-                    noMatchCount.incrementAndGet();
-                }
-
-                matchedTransactions.add(transaction);
-
-            } catch (Exception e) {
-                log.error("❌ Error matching transaction: {}", transaction.getDescription(), e);
-                matchedTransactions.add(transaction);
+                validTransactions.add(transaction);
             }
         }
 
-        // ========== STATISTICS AND LOGGING ==========
-        long duration = System.currentTimeMillis() - startTime;
+        log.info("✅ After validation: {} valid transactions of {}",
+                validTransactions.size(), transactions.size());
 
-        log.info("📊 Auto-matching completed in {}ms", duration);
-        log.info("   🔹 Transactions processed: {}", transactions.size());
-        log.info("   ✅ Auto-matched: {}", autoMatchedCount.get());
-        log.info("   ❌ No match: {}", noMatchCount.get());
-
-        if (transactions.size() > 0) {
-            double matchRate = (autoMatchedCount.get() * 100.0) / transactions.size();
-            log.info("   📈 Match success rate: {:.1f}%", matchRate);
-        }
-
-        return matchedTransactions;
+        return validTransactions;
     }
 
     private List<BankTransaction> saveTransactionsInBatches(List<BankTransaction> transactions) {
@@ -402,7 +376,6 @@ public class TransactionService {
         int batchSize = 1000;
         int totalBatches = (transactions.size() + batchSize - 1) / batchSize;
 
-        int feeAppliedCount = 0;
         for (int i = 0; i < transactions.size(); i += batchSize) {
             int end = Math.min(i + batchSize, transactions.size());
             List<BankTransaction> batch = transactions.subList(i, end);
@@ -411,82 +384,115 @@ public class TransactionService {
                 log.info("  Saving batch {}/{} ({} transactions)",
                         (i/batchSize) + 1, totalBatches, batch.size());
 
-                List<BankTransaction> savedBatch = bankTransactionRepository.saveAll(batch);
-                savedTransactions.addAll(savedBatch);
-                log.info("    ✅ Batch saved successfully");
+                // ========== PRE-VALIDATION CHECK ==========
+                List<BankTransaction> validBatch = new ArrayList<>();
+                List<BankTransaction> invalidBatch = new ArrayList<>();
 
-                int paymentCreatedCount = 0;
-                feeAppliedCount = 0;
+                for (BankTransaction transaction : batch) {
+                    if (transaction.getStudent() == null) {
+                        // No student matched - keep as UNVERIFIED
+                        invalidBatch.add(transaction);
+                        continue;
+                    }
 
-                for (BankTransaction savedTransaction : savedBatch) {
-                    if (savedTransaction.getStudent() != null &&
-                            savedTransaction.getStatus() == TransactionStatus.MATCHED &&
-                            savedTransaction.getPaymentTransaction() == null) {
-
-                        try {
-                            PaymentTransaction paymentTransaction =
-                                    paymentTransactionService.createFromMatchedBankTransaction(savedTransaction);
-
-                            // Apply payment to term fees
-                            try {
-                                PaymentApplicationRequest feeRequest = new PaymentApplicationRequest();
-                                feeRequest.setStudentId(savedTransaction.getStudent().getId());
-                                feeRequest.setAmount(savedTransaction.getAmount());
-                                feeRequest.setReference(savedTransaction.getBankReference());
-                                feeRequest.setNotes("Auto-matched from bank import");
-
-                                PaymentApplicationResponse feeResponse = termFeeService.applyPaymentToStudent(feeRequest);
-                                feeAppliedCount++;
-
-                                log.debug("Applied payment to term fees for student {}: KES {}, All paid: {}",
-                                        savedTransaction.getStudent().getFullName(),
-                                        savedTransaction.getAmount(),
-                                        feeResponse.getAllPaid());
-
-                            } catch (Exception feeError) {
-                                log.warn("⚠️ Failed to apply payment to term fees: {}", feeError.getMessage());
-                            }
-
-                            sendAutoMatchSms(
-                                    savedTransaction.getStudent(),
-                                    savedTransaction,
-                                    paymentTransaction
+                    // Validate student has term assignments and fees
+                    TransactionValidationService.ValidationResult validation =
+                            transactionValidationService.validateStudentForPayment(
+                                    transaction.getStudent().getId(),
+                                    transaction.getStudent().getFullName()
                             );
 
-                            paymentCreatedCount++;
+                    if (!validation.isValid()) {
+                        log.error("❌ Transaction {} rejected: {}",
+                                transaction.getBankReference(), validation.getMessage());
 
-                        } catch (Exception e) {
-                            log.warn("Failed to create payment for transaction {}: {}",
-                                    savedTransaction.getBankReference(), e.getMessage());
-                        }
+                        transaction.setStatus(TransactionStatus.UNVERIFIED);
+                        transaction.setStudent(null);
+                        transaction.setNotes("REJECTED: " + validation.getMessage());
+                        invalidBatch.add(transaction);
+                    } else {
+                        validBatch.add(transaction);
                     }
                 }
 
-                log.debug("Batch {}: {} payments, {} fee applications",
-                        (i/batchSize) + 1, paymentCreatedCount, feeAppliedCount);
+                log.info("    Batch {}: {} valid, {} invalid",
+                        (i/batchSize) + 1, validBatch.size(), invalidBatch.size());
+
+                // Save invalid transactions (marked as UNVERIFIED)
+                if (!invalidBatch.isEmpty()) {
+                    bankTransactionRepository.saveAll(invalidBatch);
+                    savedTransactions.addAll(invalidBatch);
+                }
+
+                // Process valid transactions
+                if (!validBatch.isEmpty()) {
+                    List<BankTransaction> savedValidBatch = bankTransactionRepository.saveAll(validBatch);
+                    savedTransactions.addAll(savedValidBatch);
+
+                    // Now process payments for valid transactions
+                    processPaymentsForValidTransactions(savedValidBatch);
+                }
+                // ==========================================
 
             } catch (Exception e) {
                 log.error("❌ Failed to save batch {}-{}: {}", i, end, e.getMessage(), e);
-                // Try to save individually to identify problematic transactions
-                for (BankTransaction tx : batch) {
+            }
+        }
+
+        return savedTransactions;
+    }
+
+    private void processPaymentsForValidTransactions(List<BankTransaction> validTransactions) {
+        int paymentCreatedCount = 0;
+        int feeAppliedCount = 0;
+
+        for (BankTransaction savedTransaction : validTransactions) {
+            if (savedTransaction.getStudent() != null &&
+                    savedTransaction.getStatus() == TransactionStatus.MATCHED &&
+                    savedTransaction.getPaymentTransaction() == null) {
+
+                try {
+                    PaymentTransaction paymentTransaction =
+                            paymentTransactionService.createFromMatchedBankTransaction(savedTransaction);
+
+                    // Apply payment to term fees
                     try {
-                        BankTransaction saved = bankTransactionRepository.save(tx);
-                        savedTransactions.add(saved);
-                    } catch (Exception ex) {
-                        log.error("Failed to save transaction {}: {}", tx.getBankReference(), ex.getMessage());
+                        PaymentApplicationRequest feeRequest = new PaymentApplicationRequest();
+                        feeRequest.setStudentId(savedTransaction.getStudent().getId());
+                        feeRequest.setAmount(savedTransaction.getAmount());
+                        feeRequest.setReference(savedTransaction.getBankReference());
+                        feeRequest.setNotes("Auto-matched from bank import");
+
+                        PaymentApplicationResponse feeResponse = termFeeService.applyPaymentToStudent(feeRequest);
+                        feeAppliedCount++;
+
+                        log.info("✅ Payment applied: {} +₹{} (Receipt: {}), Pending: ₹{}",
+                                savedTransaction.getStudent().getFullName(),
+                                savedTransaction.getAmount(),
+                                paymentTransaction.getReceiptNumber(),
+                                feeResponse.getRemainingPayment());
+
+                    } catch (Exception feeError) {
+                        log.warn("⚠️ Failed to apply payment to term fees: {}", feeError.getMessage());
                     }
+
+                    sendAutoMatchSms(
+                            savedTransaction.getStudent(),
+                            savedTransaction,
+                            paymentTransaction
+                    );
+
+                    paymentCreatedCount++;
+
+                } catch (Exception e) {
+                    log.warn("Failed to create payment for transaction {}: {}",
+                            savedTransaction.getBankReference(), e.getMessage());
                 }
             }
         }
 
-        log.info("✅ Saved {} transactions, created {} payment transactions, applied {} fee payments",
-                savedTransactions.size(),
-                savedTransactions.stream()
-                        .filter(bt -> bt.getPaymentTransaction() != null)
-                        .count(),
-                feeAppliedCount);
-
-        return savedTransactions;
+        log.info("💰 Processed {} payments, applied {} fee payments",
+                paymentCreatedCount, feeAppliedCount);
     }
 
     @Async
@@ -1870,5 +1876,9 @@ public class TransactionService {
 
     public Map<String, Object> getFeeStatistics() {
         return getFeeStatisticsByGrade();
+    }
+    public Student getStudent(Long studentId) {
+        return studentRepository.findById(studentId)
+                .orElseThrow(() -> new RuntimeException("Student not found with id: " + studentId));
     }
 }

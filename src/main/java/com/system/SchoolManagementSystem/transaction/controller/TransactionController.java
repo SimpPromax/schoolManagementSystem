@@ -1,18 +1,20 @@
 package com.system.SchoolManagementSystem.transaction.controller;
 
+import com.system.SchoolManagementSystem.student.entity.Student;
+import com.system.SchoolManagementSystem.transaction.entity.BankTransaction;
+import com.system.SchoolManagementSystem.transaction.util.BankStatementParser;
+import com.system.SchoolManagementSystem.transaction.util.TransactionMatcher;
 import com.system.SchoolManagementSystem.transaction.dto.request.*;
 import com.system.SchoolManagementSystem.transaction.dto.response.*;
 import com.system.SchoolManagementSystem.transaction.enums.TransactionStatus;
 import com.system.SchoolManagementSystem.transaction.service.TransactionService;
 import com.system.SchoolManagementSystem.transaction.service.StudentCacheService;
-import com.system.SchoolManagementSystem.transaction.util.TransactionMatcher;
+import com.system.SchoolManagementSystem.transaction.validation.TransactionValidationService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpHeaders;
@@ -24,10 +26,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.*;
 
 @RestController
 @RequestMapping("/api/transactions")
@@ -38,6 +37,8 @@ public class TransactionController {
     private final TransactionService transactionService;
     private final StudentCacheService studentCacheService;
     private final TransactionMatcher transactionMatcher;
+    private final BankStatementParser bankStatementParser;
+    private final TransactionValidationService transactionValidationService;
 
     // ========== OPTIMIZATION ENDPOINTS ==========
 
@@ -127,6 +128,100 @@ public class TransactionController {
             errorResponse.put("timestamp", LocalDateTime.now().toString());
 
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    // ========== IMPORT VALIDATION ENDPOINT ==========
+
+    @PostMapping("/import/validate")
+    public ResponseEntity<Map<String, Object>> validateImport(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "bankAccount", required = false) String bankAccount) {
+
+        try {
+            // Parse transactions without saving
+            List<BankTransaction> transactions = bankStatementParser.parseCsv(file, bankAccount);
+
+            log.info("🔍 Validating {} transactions before import", transactions.size());
+
+            int validCount = 0;
+            int invalidCount = 0;
+            List<Map<String, Object>> validationResults = new ArrayList<>();
+
+            for (BankTransaction transaction : transactions) {
+                Map<String, Object> result = new HashMap<>();
+                result.put("bankReference", transaction.getBankReference());
+                result.put("amount", transaction.getAmount());
+                result.put("description", transaction.getDescription());
+                result.put("transactionDate", transaction.getTransactionDate());
+
+                // Try to match student
+                Optional<Student> matchedStudent = transactionMatcher.findMatchingStudent(transaction);
+
+                if (matchedStudent.isPresent()) {
+                    Student student = matchedStudent.get();
+                    result.put("matchedStudent", student.getFullName());
+                    result.put("matchedStudentId", student.getId());
+                    result.put("studentGrade", student.getGrade());
+
+                    // Validate student
+                    TransactionValidationService.ValidationResult validation =
+                            transactionValidationService.validateStudentForPayment(
+                                    student.getId(), student.getFullName()
+                            );
+
+                    result.put("valid", validation.isValid());
+                    result.put("validationMessage", validation.getMessage());
+                    result.put("errorCode", validation.getErrorCode());
+                    result.put("totalPendingAmount", validation.getTotalPendingAmount());
+                    result.put("hasTermAssignments", validation.isHasTermAssignments());
+                    result.put("termAssignmentCount", validation.getTermAssignmentCount());
+
+                    if (validation.isValid()) {
+                        validCount++;
+                        result.put("status", "VALID");
+                        result.put("recommendedAction", "Can be imported and auto-matched");
+                    } else {
+                        invalidCount++;
+                        result.put("status", "INVALID");
+                        result.put("recommendedAction", "Will be rejected during import");
+                    }
+                } else {
+                    invalidCount++;
+                    result.put("matchedStudent", null);
+                    result.put("valid", false);
+                    result.put("validationMessage", "No student match found");
+                    result.put("errorCode", "NO_STUDENT_MATCH");
+                    result.put("status", "UNMATCHED");
+                    result.put("recommendedAction", "Manual matching required");
+                }
+
+                validationResults.add(result);
+            }
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", String.format("Validation complete: %d valid, %d invalid",
+                    validCount, invalidCount));
+            response.put("totalTransactions", transactions.size());
+            response.put("validCount", validCount);
+            response.put("invalidCount", invalidCount);
+            response.put("validationResults", validationResults);
+            response.put("timestamp", LocalDateTime.now().toString());
+
+            if (invalidCount > 0) {
+                response.put("warning", "Some transactions will be rejected if imported");
+            }
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Validation failed: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
         }
     }
 
@@ -455,6 +550,7 @@ public class TransactionController {
         }
     }
 
+
     // ========== STATISTICS ENDPOINTS (UPDATED) ==========
 
     @GetMapping("/statistics")
@@ -759,6 +855,113 @@ public class TransactionController {
             errorResponse.put("timestamp", LocalDateTime.now().toString());
 
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    // ========== NEW TERM FEE INTEGRATION ENDPOINTS ==========
+
+    @GetMapping("/student/{studentId}/fee-details")
+    public ResponseEntity<Map<String, Object>> getStudentFeeDetails(@PathVariable Long studentId) {
+        try {
+            Map<String, Object> feeDetails = transactionService.getStudentFeeDetails(studentId);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Student fee details retrieved successfully");
+            response.put("data", feeDetails);
+            response.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to retrieve fee details: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    @PostMapping("/student/{studentId}/manual-payment")
+    public ResponseEntity<Map<String, Object>> applyManualPayment(
+            @PathVariable Long studentId,
+            @RequestParam Double amount,
+            @RequestParam(required = false) String reference,
+            @RequestParam(required = false) String notes) {
+
+        try {
+            Map<String, Object> result = transactionService.applyManualPaymentToStudent(
+                    studentId, amount, reference, notes);
+
+            return ResponseEntity.ok(result);
+
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to apply manual payment: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
+        }
+    }
+
+    @GetMapping("/fee-statistics")
+    public ResponseEntity<Map<String, Object>> getFeeStatistics() {
+        try {
+            Map<String, Object> statistics = transactionService.getFeeStatistics();
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Fee statistics retrieved successfully");
+            response.put("data", statistics);
+            response.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to retrieve fee statistics: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    // ========== STUDENT VALIDATION ENDPOINT ==========
+
+    @GetMapping("/student/{studentId}/validate-payment")
+    public ResponseEntity<Map<String, Object>> validateStudentForPayment(@PathVariable Long studentId) {
+        try {
+            // Get student name first
+            com.system.SchoolManagementSystem.student.entity.Student student =
+                    transactionService.getStudent(studentId); // You'll need to add this method to TransactionService
+
+            if (student == null) {
+                throw new RuntimeException("Student not found with id: " + studentId);
+            }
+
+            TransactionValidationService.ValidationResult validation =
+                    transactionValidationService.validateStudentForPayment(
+                            studentId, student.getFullName()
+                    );
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Student validation completed");
+            response.put("data", validation);
+            response.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to validate student: " + e.getMessage());
+            errorResponse.put("timestamp", LocalDateTime.now().toString());
+
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
         }
     }
 }
