@@ -14,7 +14,20 @@ import java.util.Set;
 @Repository
 public interface StudentTermAssignmentRepository extends JpaRepository<StudentTermAssignment, Long> {
 
-    // ========== EXISTING METHODS ==========
+    // ========== NEW CRITICAL METHOD - FIXES THE TRANSACTION ISSUE ==========
+
+    /**
+     * Check if a student-term assignment exists (prevents transient object issues)
+     * IMPORTANT: This method uses EXISTS query which is safe for checking without loading entities
+     */
+    @Query("SELECT CASE WHEN COUNT(sta) > 0 THEN true ELSE false END " +
+            "FROM StudentTermAssignment sta " +
+            "WHERE sta.student.id = :studentId AND sta.academicTerm.id = :academicTermId")
+    boolean existsByStudentIdAndAcademicTermId(@Param("studentId") Long studentId,
+                                               @Param("academicTermId") Long academicTermId);
+
+    // ========== EXISTING METHODS (with fixes) ==========
+
     Optional<StudentTermAssignment> findByStudentIdAndAcademicTermId(Long studentId, Long academicTermId);
 
     List<StudentTermAssignment> findByStudentId(Long studentId);
@@ -165,4 +178,51 @@ public interface StudentTermAssignmentRepository extends JpaRepository<StudentTe
             "AND ta.termFeeStatus IN ('PENDING', 'PARTIAL', 'OVERDUE') " +
             "GROUP BY ta.student.id")
     List<Object[]> batchGetPendingTermAssignmentInfo(@Param("studentIds") Set<Long> studentIds);
+
+    // ========== NEW QUERY METHODS FOR AUTO-BILLING ==========
+
+    /**
+     * Check if student is already billed for term (optimized version)
+     */
+    @Query("SELECT s FROM StudentTermAssignment s " +
+            "WHERE s.student.id = :studentId " +
+            "AND s.academicTerm.id = :termId " +
+            "AND s.isBilled = true")
+    Optional<StudentTermAssignment> findBilledAssignment(@Param("studentId") Long studentId,
+                                                         @Param("termId") Long termId);
+
+    /**
+     * Find assignments by student and academic year with pending fees
+     */
+    @Query("SELECT s FROM StudentTermAssignment s " +
+            "WHERE s.student.id = :studentId " +
+            "AND s.academicTerm.academicYear = :academicYear " +
+            "AND s.pendingAmount > 0 " +
+            "ORDER BY s.dueDate ASC")
+    List<StudentTermAssignment> findPendingAssignmentsByStudentAndYear(
+            @Param("studentId") Long studentId,
+            @Param("academicYear") String academicYear);
+
+    /**
+     * Get total pending amount for a student across all terms
+     */
+    @Query("SELECT COALESCE(SUM(s.pendingAmount), 0) FROM StudentTermAssignment s WHERE s.student.id = :studentId")
+    Double getTotalPendingAmountForStudent(@Param("studentId") Long studentId);
+
+    /**
+     * Get assignments that need billing (no fee items yet)
+     */
+    @Query("SELECT s FROM StudentTermAssignment s WHERE s.isBilled = false OR s.feeItems IS EMPTY")
+    List<StudentTermAssignment> findAssignmentsNeedingBilling();
+
+    /**
+     * Get assignments with overdue fees for reminder generation
+     */
+    @Query("SELECT s FROM StudentTermAssignment s " +
+            "WHERE s.termFeeStatus IN ('PENDING', 'PARTIAL', 'OVERDUE') " +
+            "AND s.dueDate IS NOT NULL " +
+            "AND s.dueDate <= CURRENT_DATE " +
+            "AND (s.lastReminderDate IS NULL OR s.lastReminderDate < :reminderCutoffDate)")
+    List<StudentTermAssignment> findAssignmentsNeedingFeeReminder(
+            @Param("reminderCutoffDate") LocalDate reminderCutoffDate);
 }

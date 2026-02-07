@@ -216,6 +216,11 @@ public class Student {
     @Builder.Default
     private Set<StudentTermAssignment> termAssignments = new HashSet<>();
 
+    // ========== NEW: MANUAL DUE DATE FLAG ==========
+    @Transient
+    @Builder.Default
+    private boolean manualDueDateUpdate = false;
+
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
@@ -228,7 +233,67 @@ public class Student {
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
         lastFeeUpdate = LocalDateTime.now();
-        calculateFeeDetails();
+
+        // Skip automatic due date calculation if it was manually set
+        if (!manualDueDateUpdate) {
+            calculateFeeDetails();
+        } else {
+            // Reset the flag after processing
+            manualDueDateUpdate = false;
+            // Still calculate other fee details but preserve due date
+            calculateFeeDetailsWithoutDueDate();
+        }
+    }
+
+    /**
+     * Calculate fee details WITHOUT updating due date
+     * Used when due date is manually set
+     */
+    private void calculateFeeDetailsWithoutDueDate() {
+        try {
+            LocalDate preservedDueDate = this.feeDueDate;
+
+            // Calculate totals but preserve due date
+            if (Hibernate.isInitialized(this.termAssignments) && this.termAssignments != null) {
+                // Calculate totals from term assignments
+                double totalTermFee = getTotalFeeAmount();
+                double totalPaid = getTotalPaidAmount();
+                double totalPending = getTotalPendingAmount();
+
+                // Calculate fee breakdown from term assignments
+                double tuitionTotal = getTuitionFeeTotal();
+                double admissionTotal = getAdmissionFeeTotal();
+                double examinationTotal = getExaminationFeeTotal();
+                double otherTotal = getOtherFeesTotal();
+
+                // Update fields (except due date)
+                this.totalFee = totalTermFee;
+                this.paidAmount = totalPaid;
+                this.pendingAmount = totalPending;
+                this.tuitionFee = tuitionTotal;
+                this.admissionFee = admissionTotal;
+                this.examinationFee = examinationTotal;
+                this.otherFees = otherTotal;
+
+                // Update fee status based on current due date and payments
+                updateFeeStatusBasedOnCurrentDueDate();
+
+            } else {
+                // If termAssignments not initialized, keep existing values or set defaults
+                this.pendingAmount = this.totalFee != null ?
+                        Math.max(0, this.totalFee - (this.paidAmount != null ? this.paidAmount : 0.0)) : 0.0;
+
+                // Update status based on current due date
+                updateFeeStatusBasedOnCurrentDueDate();
+            }
+
+            // Restore the preserved due date
+            this.feeDueDate = preservedDueDate;
+
+        } catch (Exception e) {
+            // Log error but don't throw
+            System.err.println("Error calculating fee details without due date: " + e.getMessage());
+        }
     }
 
     /**
@@ -258,27 +323,155 @@ public class Student {
                 this.examinationFee = examinationTotal;
                 this.otherFees = otherTotal;
 
-                // Update fee status
-                if (totalPaid >= totalTermFee) {
-                    this.feeStatus = FeeStatus.PAID;
-                } else if (totalPaid > 0) {
-                    this.feeStatus = FeeStatus.PARTIAL;
-                } else {
-                    this.feeStatus = FeeStatus.PENDING;
-                }
-
+                // ========== SMART DUE DATE MANAGEMENT ==========
                 // Update fee due date (earliest pending due date)
                 Optional<LocalDate> earliestDueDate = getEarliestPendingDueDate();
-                earliestDueDate.ifPresent(date -> this.feeDueDate = date);
+                this.feeDueDate = earliestDueDate.orElse(null);
+
+                // Update fee status SMARTLY based on due date and payments
+                updateFeeStatusBasedOnDueDate();
+
             } else {
                 // If termAssignments not initialized, keep existing values or set defaults
                 this.pendingAmount = this.totalFee != null ?
                         Math.max(0, this.totalFee - (this.paidAmount != null ? this.paidAmount : 0.0)) : 0.0;
+
+                // Still update status based on current data
+                updateFeeStatusBasedOnDueDate();
             }
         } catch (Exception e) {
             // Log error but don't throw - we can still function without term assignments
             System.err.println("Error calculating fee details: " + e.getMessage());
         }
+    }
+
+    /**
+     * Update fee status based on due date and payment status
+     */
+    private void updateFeeStatusBasedOnDueDate() {
+        // If all fees are paid, status is PAID (regardless of due date)
+        if (this.pendingAmount != null && this.pendingAmount <= 0) {
+            this.feeStatus = FeeStatus.PAID;
+            return;
+        }
+
+        // If no pending amount but no total fee either
+        if (this.totalFee == null || this.totalFee <= 0) {
+            this.feeStatus = FeeStatus.PAID;
+            return;
+        }
+
+        // Check if we have a due date
+        if (this.feeDueDate == null) {
+            // No due date but has pending fees
+            if (this.paidAmount != null && this.paidAmount > 0) {
+                this.feeStatus = FeeStatus.PARTIAL;
+            } else {
+                this.feeStatus = FeeStatus.PENDING;
+            }
+            return;
+        }
+
+        LocalDate today = LocalDate.now();
+
+        // Check if due date has passed
+        if (today.isAfter(this.feeDueDate)) {
+            // Due date passed = OVERDUE (if there's pending amount)
+            if (this.pendingAmount != null && this.pendingAmount > 0) {
+                this.feeStatus = FeeStatus.OVERDUE;
+            } else {
+                // Somehow due date passed but nothing pending
+                this.feeStatus = FeeStatus.PAID;
+            }
+        } else {
+            // Due date not passed yet
+            if (this.paidAmount != null && this.paidAmount > 0) {
+                this.feeStatus = FeeStatus.PARTIAL;
+            } else {
+                this.feeStatus = FeeStatus.PENDING;
+            }
+        }
+    }
+
+    /**
+     * Update fee status based on CURRENT due date (without recalculating due date)
+     */
+    private void updateFeeStatusBasedOnCurrentDueDate() {
+        // If all fees are paid, status is PAID (regardless of due date)
+        if (this.pendingAmount != null && this.pendingAmount <= 0) {
+            this.feeStatus = FeeStatus.PAID;
+            return;
+        }
+
+        // If no pending amount but no total fee either
+        if (this.totalFee == null || this.totalFee <= 0) {
+            this.feeStatus = FeeStatus.PAID;
+            return;
+        }
+
+        // Check if we have a due date
+        if (this.feeDueDate == null) {
+            // No due date but has pending fees
+            if (this.paidAmount != null && this.paidAmount > 0) {
+                this.feeStatus = FeeStatus.PARTIAL;
+            } else {
+                this.feeStatus = FeeStatus.PENDING;
+            }
+            return;
+        }
+
+        LocalDate today = LocalDate.now();
+
+        // Check if due date has passed
+        if (today.isAfter(this.feeDueDate)) {
+            // Due date passed = OVERDUE (if there's pending amount)
+            if (this.pendingAmount != null && this.pendingAmount > 0) {
+                this.feeStatus = FeeStatus.OVERDUE;
+            } else {
+                // Somehow due date passed but nothing pending
+                this.feeStatus = FeeStatus.PAID;
+            }
+        } else {
+            // Due date not passed yet
+            if (this.paidAmount != null && this.paidAmount > 0) {
+                this.feeStatus = FeeStatus.PARTIAL;
+            } else {
+                this.feeStatus = FeeStatus.PENDING;
+            }
+        }
+    }
+
+    // ========== NEW: MANUAL DUE DATE METHODS ==========
+
+    /**
+     * Set due date manually (bypasses automatic calculation)
+     */
+    public void setFeeDueDateManually(LocalDate dueDate) {
+        this.feeDueDate = dueDate;
+        this.manualDueDateUpdate = true;
+        updateFeeStatusBasedOnCurrentDueDate();
+    }
+
+    /**
+     * Clear due date manually
+     */
+    public void clearFeeDueDateManually() {
+        this.feeDueDate = null;
+        this.manualDueDateUpdate = true;
+        if (this.pendingAmount != null && this.pendingAmount <= 0) {
+            this.feeStatus = FeeStatus.PAID;
+        } else if (this.paidAmount != null && this.paidAmount > 0) {
+            this.feeStatus = FeeStatus.PARTIAL;
+        } else {
+            this.feeStatus = FeeStatus.PENDING;
+        }
+    }
+
+    /**
+     * Update due date from term (sets manual flag)
+     */
+    public void updateDueDateFromTerm(LocalDate termDueDate) {
+        setFeeDueDateManually(termDueDate);
     }
 
     // ========== HELPER METHODS FOR TERM FEE CALCULATION ==========
@@ -412,11 +605,33 @@ public class Student {
         if (!Hibernate.isInitialized(this.termAssignments) || this.termAssignments == null) {
             return Optional.empty();
         }
-        return termAssignments.stream()
-                .filter(ta -> ta.getPendingAmount() > 0)
-                .map(StudentTermAssignment::getDueDate)
-                .filter(date -> date != null)
-                .min(LocalDate::compareTo);
+
+        LocalDate earliestDate = null;
+
+        // Check term assignment due dates
+        for (StudentTermAssignment assignment : this.termAssignments) {
+            if (assignment.getPendingAmount() > 0 && assignment.getDueDate() != null) {
+                if (earliestDate == null || assignment.getDueDate().isBefore(earliestDate)) {
+                    earliestDate = assignment.getDueDate();
+                }
+            }
+
+            // Also check individual fee items for due dates
+            if (Hibernate.isInitialized(assignment.getFeeItems())) {
+                for (var feeItem : assignment.getFeeItems()) {
+                    if (feeItem.getPendingAmount() != null &&
+                            feeItem.getPendingAmount() > 0 &&
+                            feeItem.getDueDate() != null) {
+
+                        if (earliestDate == null || feeItem.getDueDate().isBefore(earliestDate)) {
+                            earliestDate = feeItem.getDueDate();
+                        }
+                    }
+                }
+            }
+        }
+
+        return Optional.ofNullable(earliestDate);
     }
 
     /**
@@ -493,6 +708,91 @@ public class Student {
      */
     public void updateFeeSummary() {
         calculateFeeDetails();
+    }
+
+    // ========== NEW HELPER METHODS FOR SMART DUE DATE MANAGEMENT ==========
+
+    /**
+     * Check if due date is overdue
+     */
+    @Transient
+    public boolean isDueDateOverdue() {
+        if (this.feeDueDate == null) return false;
+        return LocalDate.now().isAfter(this.feeDueDate) &&
+                this.pendingAmount != null &&
+                this.pendingAmount > 0;
+    }
+
+    /**
+     * Get days until due date (negative if overdue)
+     */
+    @Transient
+    public Long getDaysUntilDueDate() {
+        if (this.feeDueDate == null) return null;
+        return java.time.temporal.ChronoUnit.DAYS.between(LocalDate.now(), this.feeDueDate);
+    }
+
+    /**
+     * Get overdue days count
+     */
+    @Transient
+    public Long getOverdueDays() {
+        if (!isDueDateOverdue()) return 0L;
+        return Math.abs(getDaysUntilDueDate());
+    }
+
+    /**
+     * Clear due date when all fees are paid
+     * Call this after successful payment
+     */
+    public void clearDueDateIfPaid() {
+        if (this.pendingAmount != null && this.pendingAmount <= 0) {
+            this.feeDueDate = null;
+            this.feeStatus = FeeStatus.PAID;
+        }
+    }
+
+    /**
+     * Force refresh of due date and status
+     * Useful when term assignments change outside normal flow
+     */
+    public void refreshFeeStatusAndDueDate() {
+        calculateFeeDetails();
+    }
+
+    /**
+     * Check if student needs due date update
+     */
+    @Transient
+    public boolean needsDueDateUpdate() {
+        if (this.feeDueDate == null && (this.pendingAmount == null || this.pendingAmount <= 0)) {
+            return false; // Already cleared
+        }
+
+        Optional<LocalDate> calculatedDueDate = getEarliestPendingDueDate();
+        LocalDate currentDueDate = this.feeDueDate;
+
+        if (calculatedDueDate.isPresent() && currentDueDate == null) {
+            return true; // Should have a due date but doesn't
+        }
+
+        if (!calculatedDueDate.isPresent() && currentDueDate != null) {
+            return true; // Shouldn't have a due date but does
+        }
+
+        if (calculatedDueDate.isPresent() && currentDueDate != null) {
+            return !calculatedDueDate.get().equals(currentDueDate); // Dates differ
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if due date was manually set
+     */
+    @Transient
+    public boolean isDueDateManuallySet() {
+        return this.manualDueDateUpdate;
     }
 
     // ========== NEW HELPER METHODS FOR TERM ASSIGNMENTS ==========
@@ -633,6 +933,40 @@ public class Student {
     @Transient
     public Boolean getHasOverdueTermAssignments() {
         return !getOverdueTermAssignments().isEmpty();
+    }
+
+    /**
+     * Get due date status description
+     */
+    @Transient
+    public String getDueDateStatus() {
+        if (this.feeDueDate == null) {
+            return "NO_DUE_DATE";
+        }
+
+        LocalDate today = LocalDate.now();
+
+        if (today.isAfter(this.feeDueDate)) {
+            return "OVERDUE";
+        } else if (today.isEqual(this.feeDueDate)) {
+            return "DUE_TODAY";
+        } else if (today.plusDays(3).isAfter(this.feeDueDate)) {
+            return "DUE_SOON";
+        } else {
+            return "UPCOMING";
+        }
+    }
+
+    /**
+     * Check if payment is urgent (due within 3 days or overdue)
+     */
+    @Transient
+    public boolean isPaymentUrgent() {
+        if (this.feeDueDate == null) return false;
+
+        LocalDate today = LocalDate.now();
+        return today.isAfter(this.feeDueDate) ||
+                !today.plusDays(3).isBefore(this.feeDueDate);
     }
 
     // ========== ENUMS ==========

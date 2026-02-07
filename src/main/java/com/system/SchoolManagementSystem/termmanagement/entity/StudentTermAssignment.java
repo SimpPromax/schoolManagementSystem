@@ -9,6 +9,7 @@ import lombok.*;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
 @Entity
@@ -25,12 +26,12 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 @ToString(exclude = {"student", "academicTerm", "studentFeeAssignment", "feeItems"})
-@EqualsAndHashCode(onlyExplicitlyIncluded = true) // Add this
+@EqualsAndHashCode(onlyExplicitlyIncluded = true)
 public class StudentTermAssignment {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
-    @EqualsAndHashCode.Include // Add this
+    @EqualsAndHashCode.Include
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY)
@@ -79,8 +80,11 @@ public class StudentTermAssignment {
     @JoinColumn(name = "student_fee_assignment_id")
     private StudentFeeAssignment studentFeeAssignment;
 
-    // Detailed fee items for this term
-    @OneToMany(mappedBy = "studentTermAssignment", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    // Detailed fee items for this term - FIXED CASCADE SETTINGS
+    @OneToMany(mappedBy = "studentTermAssignment",
+            cascade = {CascadeType.PERSIST, CascadeType.MERGE, CascadeType.REMOVE},
+            fetch = FetchType.LAZY,
+            orphanRemoval = false) // Changed to false to avoid cascade issues
     @JsonManagedReference
     @Builder.Default
     private List<TermFeeItem> feeItems = new ArrayList<>();
@@ -98,23 +102,30 @@ public class StudentTermAssignment {
     protected void onCreate() {
         createdAt = LocalDateTime.now();
         updatedAt = LocalDateTime.now();
-        calculateAmounts();
     }
 
     @PreUpdate
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
-        calculateAmounts();
     }
 
+    // Revised method to avoid circular dependencies and ConcurrentModificationException
     public void calculateAmounts() {
-        // Calculate from fee items
-        double total = feeItems.stream()
-                .mapToDouble(TermFeeItem::getAmount)
+        // Create a defensive copy to avoid ConcurrentModificationException
+        List<TermFeeItem> itemsCopy = new ArrayList<>(feeItems);
+
+        double total = itemsCopy.stream()
+                .mapToDouble(item -> {
+                    Double amount = item.getAmount();
+                    return amount != null ? amount : 0.0;
+                })
                 .sum();
 
-        double paid = feeItems.stream()
-                .mapToDouble(TermFeeItem::getPaidAmount)
+        double paid = itemsCopy.stream()
+                .mapToDouble(item -> {
+                    Double paidAmount = item.getPaidAmount();
+                    return paidAmount != null ? paidAmount : 0.0;
+                })
                 .sum();
 
         this.totalTermFee = total;
@@ -137,19 +148,85 @@ public class StudentTermAssignment {
         }
     }
 
+    // FIXED: Safe bidirectional relationship management
     public void addFeeItem(TermFeeItem item) {
-        feeItems.add(item);
-        item.setStudentTermAssignment(this);
-        calculateAmounts();
+        if (feeItems == null) {
+            feeItems = new ArrayList<>();
+        }
+
+        // Check if item already exists
+        if (!feeItems.contains(item)) {
+            feeItems.add(item);
+            item.setStudentTermAssignment(this);
+        }
     }
 
+    // FIXED: Safe bulk add method
+    public void addFeeItems(Collection<TermFeeItem> items) {
+        if (feeItems == null) {
+            feeItems = new ArrayList<>();
+        }
+
+        for (TermFeeItem item : items) {
+            if (!feeItems.contains(item)) {
+                feeItems.add(item);
+                item.setStudentTermAssignment(this);
+            }
+        }
+    }
+
+    // FIXED: Safe removal
     public void removeFeeItem(TermFeeItem item) {
-        feeItems.remove(item);
-        item.setStudentTermAssignment(null);
-        calculateAmounts();
+        if (feeItems != null) {
+            feeItems.remove(item);
+            item.setStudentTermAssignment(null);
+        }
+    }
+
+    // NEW: Clear all items
+    public void clearFeeItems() {
+        if (feeItems != null) {
+            // Clear the bidirectional relationship
+            for (TermFeeItem item : feeItems) {
+                item.setStudentTermAssignment(null);
+            }
+            feeItems.clear();
+        }
+    }
+
+    // NEW: Setter for fee items that ensures bidirectional relationship
+    public void setFeeItems(List<TermFeeItem> feeItems) {
+        if (this.feeItems != null) {
+            // Clear existing relationships
+            for (TermFeeItem item : this.feeItems) {
+                item.setStudentTermAssignment(null);
+            }
+        }
+
+        this.feeItems = feeItems != null ? feeItems : new ArrayList<>();
+
+        // Set the bidirectional relationship
+        if (feeItems != null) {
+            for (TermFeeItem item : feeItems) {
+                item.setStudentTermAssignment(this);
+            }
+        }
     }
 
     public enum FeeStatus {
         PENDING, PARTIAL, PAID, OVERDUE, CANCELLED, WAIVED
+    }
+
+    // NEW: Helper method to check if assignment has pending fees
+    public boolean hasPendingFees() {
+        return pendingAmount != null && pendingAmount > 0;
+    }
+
+    // NEW: Helper method to get days overdue
+    public long getDaysOverdue() {
+        if (dueDate == null || LocalDate.now().isBefore(dueDate)) {
+            return 0;
+        }
+        return java.time.temporal.ChronoUnit.DAYS.between(dueDate, LocalDate.now());
     }
 }
